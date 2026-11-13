@@ -23,6 +23,27 @@ Also check, in the same printer profile:
 - *Emit machine limits to G-code* = **off**. This firmware resets every velocity/acceleration limit that a `SET_VELOCITY_LIMIT` / `M201` / `M203` / `M205` does not name back to the config value (guide ch. 28, rule 2), so a partial limit line can silently undo another one.
 - Keep your *filament start G-code* (for example `M900 K…`): it runs after the machine start code.
 
+## One-time setup: two macros in the printer configuration
+
+A print file can only run `G`/`T`/`M`+digit lines and a short list of other commands (see "Why most commands are written as `M7000 <command>`" below). Two macros whose names start with `M` + digit get everything else through. **Add them to the printer configuration before using the blocks below**, then reboot or power-cycle the printer (not `RESTART`, ch. 5). Without them the lines `M7000 …` and `M7001 …` are unknown commands.
+
+```
+[gcode_macro M7000]
+description: Run the command given as parameter (print files only run G/M/T lines)
+gcode:
+    {{ rawparams|safe }}
+
+[gcode_macro M7001]
+description: Show a message in the console
+gcode:
+    {{ action_respond_info(rawparams, "") }}
+```
+
+- `M7000 BED_MESH_CLEAR` runs `BED_MESH_CLEAR`; `M7001 hello` prints `hello` in the console. `action_respond_info` needs the second (unused) argument `""`, the template engine refuses a call with one.
+- **Test in this order:** type `M7001 hello` in the console, then run a print file with the three lines `M7001 hello from a file`, `M7000 M115`, `M7000 BED_MESH_OUTPUT`. You should get the message, the firmware line and the mesh answer.
+- Message text must not contain square brackets (Orca placeholders) and should avoid runs of four spaces.
+- **(to verify)** `rawparams` and `|safe` come from the guide's description of the template engine and from the firmware code; nothing was run. `|safe` stops the engine from escaping quotes or `<`/`>`; the commands here contain none.
+
 ---
 
 ## 1. Machine start G-code
@@ -39,12 +60,14 @@ Also check, in the same printer profile:
 ; first_layer_print_max = {first_layer_print_max[0]},{first_layer_print_max[1]}
 
 ; --- 1. Reset the state --------------------------------------------------------
-CLEAR_PAUSE                       ; forget a leftover "paused" state (G9111 does this too)
+M7001 (1/8) Reset state
+M7000 CLEAR_PAUSE                       ; forget a leftover "paused" state (G9111 does this too)
 M107                              ; part fan off
 G90                               ; absolute XYZ
-BED_MESH_CLEAR                    ; no mesh while homing / wiping / measuring the Z offset
+M7000 BED_MESH_CLEAR                    ; no mesh while homing / wiping / measuring the Z offset
 
 ; --- 2. Start the bed, home, heat the nozzle (all while the bed heats) ---------
+M7001 (2/8) Homing, bed preheat started, nozzle to wipe temperature
 M140 S{min(bed_temperature_initial_layer_single, 60)}   ; start bed heating now, no waiting
 G28                               ; home X, Y, Z
 G1 Z15 F1200                     ; lift, then park beside the bed (X457): drips fall off the plate
@@ -53,6 +76,7 @@ M104 S170                         ; wipe temperature
 M109 S170
 
 ; --- 3. Clean the nozzle on the wiper pad (the pad is off the bed: bed can still be heating)
+M7001 (3/8) Cleaning the nozzle
 G9113                             ; reset "nozzle already cleaned", otherwise G9112 does nothing
 G9112                             ; wipe (fan 100 %, 3 passes on the pad)
 M400
@@ -61,31 +85,36 @@ G1 Z15 F1200                     ; lift off the pad and park beside the bed whil
 G1 X457 F9600
 
 ; --- 3b. Bed to preheat temperature, then 1 minute soak right before measuring --
+M7001 (4/8) Waiting for the bed, then 1 minute heat soak
 M190 S{min(bed_temperature_initial_layer_single, 60)}   ; wait until the bed is within 2 C of target
 G4 P60000                         ; 1 minute heat soak
 
 ; --- 4. LeviQ3 automatic Z offset ----------------------------------------------
-BED_MESH_CLEAR
-LEVIQ_AUTO_ZOFFSET                ; nozzle to 140 C, G28 Z, strain-gauge measurement, saved
+M7001 (5/8) Measuring the Z offset (LeviQ3)
+M7000 BED_MESH_CLEAR
+M7000 LEVIQ_AUTO_ZOFFSET                ; nozzle to 140 C, G28 Z, strain-gauge measurement, saved
 M400
 G9113                             ; leave the "cleaned" memory reset (G9111 does the same)
 
 ; --- 5. Adaptive bed mesh (nozzle is at 140 C, bed at the preheat temperature) --
-BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=5 PROFILE=adaptive
+M7001 (6/8) Measuring the adaptive bed mesh
+M7000 BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=5 PROFILE=adaptive
 M400
 
 ; --- 6. Bed to print temperature, then nozzle ----------------------------------
+M7001 (7/8) Heating to print temperatures
 G1 Z15 F1200
 G1 X457 F9600                     ; park beside the bed again
 M140 S[bed_temperature_initial_layer_single]
-TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={bed_temperature_initial_layer_single - 10}   ; bed within 10 C
+M7000 TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={bed_temperature_initial_layer_single - 10}   ; bed within 10 C
 M104 S[nozzle_temperature_initial_layer]   ; only now start the nozzle: no long wait at high temperature = no ooze
 M190 S[bed_temperature_initial_layer_single]
 M109 S[nozzle_temperature_initial_layer]
-LEVIQ_TEMP_OFFSET                 ; Z correction for the hot nozzle (the offset was measured at 140 C)
+M7000 LEVIQ_TEMP_OFFSET                 ; Z correction for the hot nozzle (the offset was measured at 140 C)
 M400
 
 ; --- 7. Purge line, starting ON the bed ----------------------------------------
+M7001 (8/8) Purge line, starting the print
 M117                              ; REQUIRED by the firmware: print-start signal (X/Y to SpreadCycle, timer reset)
 G90
 M83                               ; relative E (LEVIQ_AUTO_ZOFFSET leaves absolute mode on)
@@ -117,7 +146,8 @@ G92 E0
 
 ### Things to know
 
-- **No macros in the print file, and no console messages.** Tested on the printer (2026-11-13): a macro line placed directly in a print file (`MOVE_HEAT_POS`, or any custom macro) does not run; it ends the job with the motors released. The same macro works typed in the console, and macros called *inside* built-in commands (`G9111` → `MOVE_HEAT_POS`, `G9112` → `WIPE_NOZZLE`) work. So this start code only uses built-in commands, and `MOVE_HEAT_POS` was replaced by its two moves. For the same reason there are no progress messages: `ECHO` and `STATUS` only write to the firmware log, and the macro route (`action_respond_info`) is a macro. There is no known command to show text on the printer's display either; `M117` ignores its text.
+- **Why most commands are written as `M7000 <command>`: the print reader skips lines.** Found in the firmware (disassembly of the print-file reader, 2026-11-14) and consistent with every test on the printer: a line of a print file is only executed if it starts with `G`+digit, `T`+digit or `M`+digit (the exact line `M84` is refused), or with one of 12 prefixes (`SNAPSHOT`, `SET_IDLE_TIMEOUT`, `SET_VELOCITY_LIMIT`, `SET_PRESSURE_ADVANCE`, `SAVE_GCODE_STATE`, `RESTORE_GCODE_STATE`, `TUNING_TOWER`, `SHAPER_CALIBRATE`, `EXCLUDE_OBJECT_DEFINE`, `EXCLUDE_OBJECT_START`, `EXCLUDE_OBJECT_END`, `EXCLUDE_OBJECT`). **Every other line is silently dropped, with no error**: `BED_MESH_CALIBRATE`, `BED_MESH_CLEAR`, `LEVIQ_*`, `TEMPERATURE_WAIT`, `CLEAR_PAUSE`, `RESET_VELOCITY_LIMIT`, `ECHO`, `MOVE_HEAT_POS`, any custom macro. That is why your macro tests did nothing. Stock files only use lines that pass (`G9111` does the leveling work internally). A macro whose name starts with `M` + digit (like the stock `M486`) passes the filter, so the two macros of the one-time setup (`M7000`, `M7001`) are the way in. **(to verify on the printer: the macros were not run yet.)**
+- **Console messages** come from `M7001 <text>` (`action_respond_info` does reach the console). `ECHO` and `STATUS` only write to the log. There is no known command to show text on the printer's display; `M117` ignores its text.
 - **Square brackets are Orca placeholders.** `[...]` in any custom G-code, comments included, is expanded by Orca and makes the slicer refuse ("Expecting a legacy variable expansion format"). Do not put them in comments or text.
 - **Do not turn the automatic Z offset off** (`LEVIQ_AUTO_ZOFFSET_ON_OFF ON_OFF=0`) while keeping this start code: `LEVIQ_TEMP_OFFSET` would then add its correction to the saved offset at every print. With the measurement on, `LEVIQ_AUTO_ZOFFSET` zeroes the offsets first, so nothing accumulates.
 - **`LEVIQ_AUTO_ZOFFSET` and `LEVIQ_TEMP_OFFSET` both run `SAVE_CONFIG`** (on this printer the values go to `printer_mutable.cfg`). That is the same as the stock `G9111`, but it means the config file is rewritten at each print.
@@ -140,10 +170,12 @@ M83                               ; relative E for the retract
 G1 E-1.5 F1800                    ; small retract (Orca may already have retracted)
 
 ; --- Cool down -------------------------------------------------------------------
+M7001 (1/3) Print finished: heaters off
 M104 S0                           ; nozzle heater off
 M140 S0                           ; bed heater off
 
 ; --- Present the print ------------------------------------------------------------
+M7001 (2/3) Presenting the print
 G90
 G1 Z{min(max_layer_z + 30, 500)} F1200   ; lift 30 mm above the print (Z max is 502)
 M400
@@ -151,7 +183,8 @@ G1 X0 Y420 F9600                  ; head rear-left = bed fully forward, same spo
 M400
 
 ; --- Clean up and shut down -------------------------------------------------------
-RESET_VELOCITY_LIMIT              ; back to the configured speed/acceleration limits
+M7001 (3/3) Fan and steppers off
+M7000 RESET_VELOCITY_LIMIT              ; back to the configured speed/acceleration limits
 M107                              ; part-cooling fan off
 M84                               ; steppers off (the axes become "not homed")
 ; ===== end of end G-code =====
