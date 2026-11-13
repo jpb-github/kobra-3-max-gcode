@@ -3430,7 +3430,7 @@ A **macro** is a named G-code command defined in `printer.cfg` as a `[gcode_macr
 ### What it does
 
 1. Takes the macro named `MACRO` (multiple macros share this command: the `MACRO=` parameter selects which one).
-2. Checks that the macro has a variable named `VARIABLE`. Variables exist only if the macro section declares them with a **`variable_<name>: <value>`** line. If not: error **`Unknown gcode_macro variable '<name>'`** — and, because of how this firmware reports it (returned as an internal error, not as a normal command error), the printer goes into the **shutdown state** ("Internal error on command: SET_GCODE_VARIABLE"): you must send `FIRMWARE_RESTART`/restart before printing again.
+2. Checks that the macro has a variable named `VARIABLE`. Variables exist only if the macro section declares them with a **`variable_<name>: <value>`** line. If not: error **`Unknown gcode_macro variable '<name>'`** — and, because of how this firmware reports it (returned as an internal error, not as a normal command error), the printer goes into the **shutdown state** ("Internal error on command: SET_GCODE_VARIABLE"): you must switch the printer off and on again before printing.
 3. Stores `VALUE` in it. The value is kept as **plain text (a string)** — it is **not** evaluated as a number/list/boolean like in standard Klipper. A macro that compares it with a number must convert it first (e.g. `{% if length|integer > 5 %}`). Variables declared with `variable_<name>:` in the config are text too.
 4. The change lasts until the firmware restarts (it is not saved by `SAVE_CONFIG`).
 
@@ -3684,7 +3684,7 @@ SAVE_CONFIG
 - **Status displays can be misleading.** On a Rinkhals-style printer, Moonraker's `configfile` object may keep showing the old value and the "pending" list after a successful save (observed, see chapter 3). Read the file, or `RESTART`, to be sure.
 - **Only staged items are written.** A value changed live but not staged (for example `SET_GCODE_OFFSET`, `LEVIQ_SET_ZERO`, `SET_INPUT_SHAPER`) is **not** saved by `SAVE_CONFIG`.
 - Every run leaves a backup file next to the configuration file. The firmware also cleans up old backups of the main file (to verify: how many it keeps).
-- If the existing file cannot be parsed the command fails with `Unable to parse existing config on SAVE_CONFIG`. In this firmware that kind of error is reported as an internal error and puts the printer in shutdown (needs `FIRMWARE_RESTART`) — a rare case (to verify).
+- If the existing file cannot be parsed the command fails with `Unable to parse existing config on SAVE_CONFIG`. In this firmware that kind of error is reported as an internal error and puts the printer in shutdown (needs a power off/on) — a rare case (to verify).
 - There is no check for a running print. Avoid it during a print unless you know why: it writes to flash and reloads the configuration.
 
 ---
@@ -4465,7 +4465,7 @@ Normal flow.
 ### Notes and cautions
 
 - Unlike `M220` **there is no check on `S`**: `S0` and negative values are accepted (verified: no limit is passed to the parameter reader).
-- **Do not use `S0`.** With a factor of 0 every `E` becomes 0 (the filament does not advance), and the next `M221` (any value) divides the extruder position by the old factor, 0, which gives "not a number" (NaN) — the computation does not stop on a division by zero. The extruder's G-code position is then NaN, and later extruding moves inherit it; `G92 E0` may or may not repair it (it works only as long as no extruding move has been made in between), so the safe recovery is a restart (`FIRMWARE_RESTART`/`RESTART`). The NaN is derived from the arithmetic of the code; what the motion planner does with a NaN extruder move was not examined.
+- **Do not use `S0`.** With a factor of 0 every `E` becomes 0 (the filament does not advance), and the next `M221` (any value) divides the extruder position by the old factor, 0, which gives "not a number" (NaN) — the computation does not stop on a division by zero. The extruder's G-code position is then NaN, and later extruding moves inherit it; `G92 E0` may or may not repair it (it works only as long as no extruding move has been made in between), so the safe recovery is to switch the printer off and on again. The NaN is derived from the arithmetic of the code; what the motion planner does with a NaN extruder move was not examined.
 - Applies to `G92 E` values and to `M114`'s `E` as well (they are shown/entered in "slicer" filament units).
 - Saved/restored by `SAVE_GCODE_STATE`/`RESTORE_GCODE_STATE`.
 
@@ -4510,3 +4510,82 @@ Put the printer back to a clean motion state before a manual sequence.
 ---
 
 *End of chapter 19.*
+
+---
+
+# Chapter 20 — OTA (firmware update of a control board)
+
+One command, `OTA_START`. It does **not** update the printer's main firmware (that is done through the update package). It pushes a new firmware file into one of the printer's **microcontroller boards** over the serial link: the main board (`[mcu]`) or the nozzle board (`[mcu nozzle_mcu]`).
+
+| Command | Purpose |
+|---|---|
+| `OTA_START` | Send a firmware file to a control board and let the board flash itself |
+
+(The separate command for the filament hub, `OTA_FILAMENT_HUB_START`, is in chapter 1.)
+
+---
+
+## `OTA_START` — Update the firmware of a control board
+
+### What it does
+
+1. Takes the **file name** (the folder part is ignored) and checks that it looks like `firmware_vX.Y.Z_YYYYMMDD.bin`, where X, Y, Z are numbers of 1 to 3 digits and the date has 8 digits (example: `firmware_v1.2.3_20250115.bin`). The numbers X.Y.Z become the **version** of the new firmware. If the name does not match, the command stops with the error `firmware file format error`.
+2. Opens the file and reads it completely. If this fails, the update is marked as failed (`open file error` / `read file error`) and the command returns an error.
+3. Computes a checksum (CRC32) of the file **without its last 9 bytes**. (The file must therefore be longer than 9 bytes. In the firmware file shipped in the update package, `firmware_v1.4.2_20250703.bin`, the last 9 bytes are the text `c37d560d` followed by a line feed — 8 hexadecimal characters that look like a build identifier, appended after the actual program code, which starts with a standard ARM microcontroller vector table. They are simply left out of the checksum.)
+4. Asks the selected board which firmware it currently runs (version and checksum), if not already known.
+5. **If the board already has the same version and the same checksum**, nothing is done: the update is logged as `not_need_upgrade`, the command ends without error and nothing is sent. Otherwise the new version is written to a small version file kept by the firmware.
+6. Starts a watchdog timer (10 s) and tells the board "an update with this checksum and this version is coming", then asks it to erase its update area.
+7. The board then **requests the file piece by piece**; the printer reads the requested part of the file and sends it. Progress runs from 0 to 100 %. Each piece restarts a 5 s watchdog.
+8. When the board has received, checked and written everything (`write finish`), it **restarts itself** with the new firmware. The command waits for this (it polls every 0.1 s) and ends without error. A success event is then raised and the stored version is updated.
+
+During the update the command **blocks** the G-code queue until the board is done or an error happened.
+
+### Syntax
+
+```
+OTA_START MCU=<board> UPDATE_PATH=<file>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `MCU` | Which board to update. The command is registered once per board; the value is the board's name from the configuration. | `mcu` (main board), `nozzle_mcu` (nozzle board): the name of the `[mcu …]` section in `printer.cfg`, without the word `mcu` for the main one (standard Klipper naming for multi-board commands; the command is registered with these names, but was not tried on the printer) | none (required) |
+| `UPDATE_PATH` | Path of the firmware file, on the printer's file system (relative paths are relative to the program's folder). The file name must follow `firmware_vX.Y.Z_YYYYMMDD.bin`. | text | if omitted, the firmware uses the built-in example name `./firmware_v0.1.1_20230712.bin` (the same text as in the help; no such file exists on the printer, so the command then fails with an open-file error) |
+
+### Examples
+
+```
+OTA_START MCU=nozzle_mcu UPDATE_PATH=/tmp/firmware_v1.2.3_20250115.bin
+```
+Update the nozzle board from a file copied into `/tmp`.
+
+```
+OTA_START MCU=mcu UPDATE_PATH=/useremain/firmware_v1.0.9_20241201.bin
+```
+Update the main board.
+
+### Errors you may see
+
+| Message | Cause |
+|---|---|
+| `firmware file format error` | file name does not match the pattern |
+| `open file error`, `read file error` | file missing or unreadable |
+| `ota transfer timeout` | the board stopped asking for data for about 5 s |
+| `MCU responds to ota transfer finish timeout` | the board did not answer after the last piece |
+| `wait for mcu erase flash timeout` | the board did not confirm the erase |
+| `ota data check error`, `ota data write error`, `flash write error`, `flash erase error` | the board reported a failure while checking or writing |
+
+### Notes and cautions
+
+- **Dangerous command.** A failed or interrupted update of a control board can leave the printer unusable (the board may need to be re-flashed by hand). Never run it during a print, never cut the power, and only with a file made for this board by Anycubic.
+- **Most failures shut the printer down.** In this firmware, errors that the command *returns* (as opposed to messages only shown in the console) put the printer in shutdown ("Internal error on command"), so the printer must be **switched off and on again** (power cycle) afterwards (`FIRMWARE_RESTART` is not a reliable way out on this printer; inferred from the general error handling, not tested). The "same version, nothing to do" case is the exception: it ends quietly.
+- The firmware does not check that the file really belongs to the selected board, nor the heater/print state; it only checks the file name and the board's own integrity checks (size limits of the update area come from `fw_max_size` 40960, `fw_sector_size` 2048 and `fw_ota_sector_offset` in the board's configuration section).
+- The file name regex is not anchored: a name such as `x_firmware_v1.2.3_20250115.bin_old` is also accepted (the pattern has no start/end anchor; only the file name, not the folder, is tested).
+- Version comparison uses the version number and the checksum; to force a reflash of the same version the file content has to differ.
+- A web/touchscreen interface request `ota/query_version` returns the current board version and update progress; the update status words are `ota start`, `upgrading_download`, `writing`, `transfer_finish`, `upgrading_restart`, `error`.
+- **Not test-run.** The command was only analysed, never run. Nothing in the printer's own scripts or configuration calls it; the shipped firmware file `firmware_v1.4.2_20250703.bin` (36 249 bytes, below the 40 960 byte limit) is not referenced by name anywhere that was found, so which board it targets is unknown.
+
+---
+
+*End of chapter 20.*
