@@ -935,7 +935,7 @@ Does **not** show "Hello" anywhere; it still does everything above.
 ### Notes and cautions
 
 - **Do not use `M117` as a message command in macros or G-code.** Each call switches the motor drivers to SpreadCycle and resets the print timer. Mid-print it will therefore **reset the elapsed-time display** (to verify) and make the motors noisier.
-- To check the effect, query the drivers afterwards with `DUMP_TMC` (chapter 25).
+- To check the effect, query the drivers afterwards with `DUMP_TMC` (chapter 26).
 - The print-timer reset (point 4) only happens if the print-statistics module is present, which is the case in the stock configuration.
 
 ---
@@ -5667,3 +5667,294 @@ Not an ADC name, so it prints the list of names (this is also what any valid nam
 ---
 
 *End of chapter 25.*
+
+
+---
+
+# Chapter 26 — TMC drivers
+
+The motors of the printer are driven by **TMC2209** stepper drivers, controlled over a serial (UART) link. This chapter covers the six commands that act on those drivers directly: change the motor current, switch the quiet "StealthChop" mode on or off, write a single driver setting, re-send all settings, and dump the driver registers.
+
+Stock configuration (`printer.cfg`): one driver per motor, named after the motor section:
+
+| `STEPPER=` value | Motor | Run current | Hold current |
+|---|---|---|---|
+| `stepper_x` | X axis | 1.5 A | 1.1 A |
+| `stepper_y` | Y axis (left) | 2.0 A | 1.4 A |
+| `stepper_y1` | Y axis (second motor, Max only) | 2.0 A | 1.4 A |
+| `stepper_z` | Z axis | 2.0 A | 1.5 A |
+| `extruder` | Extruder | 0.8 A | 0.4 A |
+
+All six commands are *multiplexed* commands: they need `STEPPER=<name>` from the table. Without it the console shows `Error on '<command>': missing STEPPER`; with an unknown name it shows `The value … is not valid for STEPPER` (generic wording of the firmware's multiplexed-command handler, as in chapter 13). Neither case stops the printer.
+
+| Command | What it does |
+|---|---|
+| `SET_TMC_CURRENT` | Change the run and/or hold current of a motor (until restart) |
+| `OPEN_STEALTHCHOP` | Put the driver into quiet StealthChop mode |
+| `CLOSE_STEALTHCHOP` | Put the driver into the stronger, louder SpreadCycle mode |
+| `SET_TMC_FIELD` | Write one named setting of the driver |
+| `INIT_TMC` | Re-send all remembered settings to the driver |
+| `DUMP_TMC` | Print all the registers of the driver |
+
+**Caution for the whole chapter:** these commands change how the motors are powered. A wrong value can make a motor lose steps, overheat or stop being detected during homing (X and Y homing relies on the driver's stall detection, chapter 12). Nothing here is saved to the configuration: after a restart or power-cycle the values from `printer.cfg` return. Do not use them during a print unless you know what you are doing.
+
+---
+
+## `SET_TMC_CURRENT` — Motor current
+
+### What it does
+
+1. Reads `CURRENT` (run current) and `HOLDCURRENT` (hold current), both optional.
+2. If neither is given, nothing is changed.
+3. If at least one is given: the missing one is replaced by the *current* run value, respectively by the *requested* hold value (the one from the configuration or from the last command). The driver is updated at the end of the moves already planned (the move queue is flushed first, so a running print is not interrupted but the change comes after the queued moves).
+4. The driver stores the current as a 5-bit step (32 levels), so the value actually applied is rounded to the nearest step, and the driver's sensitivity range (the "vsense" bit) is switched when needed for high currents.
+5. **No message is shown on the console.** The resulting values (`Run Current: x.xxA Hold Current: y.yyA`) are only written to the printer's log file. (The standard Klipper prints them; this firmware does not.)
+
+### Syntax
+
+```
+SET_TMC_CURRENT STEPPER=<name> [CURRENT=<amps>] [HOLDCURRENT=<amps>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `STEPPER` | Motor / driver (see table above) | `stepper_x`, `stepper_y`, `stepper_y1`, `stepper_z`, `extruder` | none — required |
+| `CURRENT` | Run current, applied while the motor moves | 0 to 2.4 A | unchanged |
+| `HOLDCURRENT` | Current while the motor stands still | 0 to 2.4 A | unchanged (the hold current is also limited to the run current when applied) |
+
+The upper limit of 2.4 A is the limit of this firmware's driver code (the standard Klipper limit for this driver is 2.0 A). Values outside 0–2.4 are **not refused**: the firmware only writes a line to its log and uses the nearest limit (general behaviour of the number parameters, see the audit note in chapter 24).
+
+### Examples
+
+```
+SET_TMC_CURRENT STEPPER=stepper_z CURRENT=1.8
+```
+Lowers the Z run current to about 1.8 A (rounded to the nearest driver step); the hold current is not changed.
+
+```
+SET_TMC_CURRENT STEPPER=extruder CURRENT=0.8 HOLDCURRENT=0.3
+```
+Sets both currents of the extruder motor.
+
+### Notes and cautions
+
+- Nothing is printed, so to check what the driver really uses, run `DUMP_TMC` and read the `IHOLD_IRUN` and `CHOPCONF` lines (the `irun`, `ihold` and `vsense` values), or look at the `run_current` / `hold_current` values in Moonraker (`tmc2209 <name>` object).
+- The change lasts until a restart (it is not written by `SAVE_CONFIG`).
+- A higher current gives more torque but heats the motor and driver; the stock values were chosen by the manufacturer.
+
+---
+
+## `CLOSE_STEALTHCHOP` — SpreadCycle mode
+
+### What it does
+
+Switches the driver of one motor from the quiet **StealthChop** mode to **SpreadCycle** (the normal chopper mode: more torque and more precise at high speed, but noisier). Steps:
+
+1. Sets the driver setting that selects SpreadCycle (`en_spreadcycle` = 1 on the TMC2209).
+2. Writes the `GCONF` register to the driver. A line with the old and new values goes to the log only.
+3. Sets the stall-detection speed threshold `TCOOLTHRS` to 0 and writes it to the driver (this switches off the stall-detection ("StallGuard") range that sensorless homing uses; it is the normal state outside homing).
+
+The commands act immediately (they are not synchronised with the move queue).
+
+The stock configuration has `stealthchop_threshold: 0` on all drivers, which means **StealthChop is the normal mode of the printer** and `CLOSE_STEALTHCHOP` is the exception. The firmware itself runs `CLOSE_STEALTHCHOP` on X and Y (and Y1 on the Max) when a print starts (`M117`, chapter 5) and after the homing used by the power-loss recovery (chapter 22), and `OPEN_STEALTHCHOP` at the end/cancel of a print (chapters 21 and 5).
+
+### Syntax
+
+```
+CLOSE_STEALTHCHOP STEPPER=<name>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `STEPPER` | Motor / driver | see the table at the start of the chapter | none — required |
+
+### Examples
+
+```
+CLOSE_STEALTHCHOP STEPPER=stepper_x
+CLOSE_STEALTHCHOP STEPPER=stepper_y
+```
+X and Y motors in SpreadCycle, the way the printer runs while printing.
+
+### Notes and cautions
+
+- There is no message. The effect can be read with `DUMP_TMC` (`GCONF` line, field `en_spreadcycle`, and the `TCOOLTHRS` line).
+- The next homing (`G28`) temporarily sets StealthChop and the stall threshold itself, and puts back what it found afterwards, so the mode you set is restored after homing.
+- For drivers that have an `en_pwm_mode` setting instead of `en_spreadcycle` (not the case on this printer), the code writes 1 into `en_pwm_mode`, which would mean the opposite (to verify, irrelevant for the TMC2209 of the printer).
+
+---
+
+## `OPEN_STEALTHCHOP` — StealthChop mode
+
+### What it does
+
+The reverse of `CLOSE_STEALTHCHOP`:
+
+1. Remembers the current `TCOOLTHRS` value.
+2. Sets the driver setting that selects StealthChop (`en_spreadcycle` = 0).
+3. Writes the `GCONF` register (the change is logged to the log file only).
+4. **Only if `TCOOLTHRS` was 0**: sets it to its maximum 1 048 575 (hex `FFFFF`) and writes the `TCOOLTHRS` register. If it already had another value, it stays.
+
+Setting `TCOOLTHRS` to the maximum is what the firmware also does during sensorless homing (stall detection active at all speeds). So after `OPEN_STEALTHCHOP` the driver is left with the stall detection enabled; the effect of this on normal printing moves was not analysed (to verify).
+
+### Syntax
+
+```
+OPEN_STEALTHCHOP STEPPER=<name>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `STEPPER` | Motor / driver | see the table at the start of the chapter | none — required |
+
+### Examples
+
+```
+OPEN_STEALTHCHOP STEPPER=stepper_x
+```
+X motor back to the quiet mode.
+
+### Notes and cautions
+
+- The firmware itself uses it at the end of a print and when it cancels, so the printer is in the quiet mode when idle.
+- A subsequent `G28` temporarily sets the homing settings again and restores `TCOOLTHRS` to 0 afterwards (a known quirk of the homing code: it always writes 0, whatever the earlier value was).
+- Like `CLOSE_STEALTHCHOP`, there is no message.
+
+---
+
+## `SET_TMC_FIELD` — Write one driver setting
+
+### What it does
+
+1. Reads `FIELD` and converts it to lower case.
+2. If the name is not a known driver setting: the command ends with the error `Unknown field name '<name>'`. **This error is returned by the command (not just displayed), so the printer goes into shutdown** (it must be power-cycled, not `FIRMWARE_RESTART`, see chapter 5). Check the name carefully.
+3. Otherwise the new `VALUE` is put into that setting (only that bit-field; other settings of the same register are kept) and the whole register is written to the driver at the end of the planned moves.
+4. No message is shown.
+
+### Syntax
+
+```
+SET_TMC_FIELD STEPPER=<name> FIELD=<field> [VALUE=<number>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `STEPPER` | Motor / driver | see the table at the start of the chapter | none — required |
+| `FIELD` | Name of the driver setting (case does not matter) | any TMC2209 field, e.g. `sgthrs`, `tcoolthrs`, `tpwmthrs`, `en_spreadcycle`, `toff`, `hstrt`, `hend`, `tbl`, `mres`, `intpol`, `irun`, `ihold`, `iholddelay`, `pwm_autoscale`, `semin`, `semax`; the names are those of the TMC2209 data sheet | none — required |
+| `VALUE` | New value of the setting | integer, written as is | **0** (VALUE is not required: if you forget it, the setting is set to 0!) |
+
+### Examples
+
+```
+SET_TMC_FIELD STEPPER=stepper_x FIELD=sgthrs VALUE=70
+```
+Changes the stall sensitivity of the X motor (stock 73) used by the sensorless homing; higher = more sensitive. Lasts until restart.
+
+```
+SET_TMC_FIELD STEPPER=stepper_y FIELD=en_spreadcycle VALUE=1
+```
+Same effect on the mode as `CLOSE_STEALTHCHOP` for the mode setting only.
+
+### Notes and cautions
+
+- A forgotten `VALUE` writes 0: `SET_TMC_FIELD STEPPER=stepper_x FIELD=irun` would set the run current step to 0 (motor without torque).
+- Whether an out-of-range value is cut to the size of the field was not examined in the firmware (standard Klipper code cuts it to the field width). Use values that fit the field.
+- Prefer `SET_TMC_CURRENT` for the currents.
+- The setting is lost at restart.
+
+---
+
+## `INIT_TMC` — Re-send the driver settings
+
+### What it does
+
+1. Writes a line `INIT_TMC <name>` in the log.
+2. Waits for the planned moves (the move queue is flushed).
+3. Sends **every register value the firmware remembers** for this driver to the driver again (for example the current, mode, stall threshold, microstepping).
+
+This is the same action the firmware does once at start-up and each time the motors are enabled, so the driver gets back its configured state (use it after a driver reset, for example a short power glitch, or after `SET_TMC_FIELD` experiments: it re-sends the *remembered* values, which include your `SET_TMC_FIELD` changes, so it does **not** restore the configuration file values).
+
+### Syntax
+
+```
+INIT_TMC STEPPER=<name>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `STEPPER` | Motor / driver | see the table at the start of the chapter | none — required |
+
+### Examples
+
+```
+INIT_TMC STEPPER=stepper_z
+```
+Re-sends the settings of the Z driver.
+
+### Notes and cautions
+
+- No console message.
+- To return to the file values after experiments, restart the printer (power-cycle).
+
+---
+
+## `DUMP_TMC` — Read the driver registers
+
+### What it does
+
+1. Writes `DUMP_TMC <name>` in the log and waits for the planned moves.
+2. Prints `========== Write-only registers ==========` and one line for each register the firmware only writes, showing the values it last sent.
+3. Prints `========== Queried registers ==========` and then reads each readable register **from the driver** and prints it. The readable registers of the TMC2209 are: `GCONF`, `GSTAT`, `IFCNT`, `OTP_READ`, `IOIN`, `FACTORY_CONF`, `TSTEP`, `MSCNT`, `MSCURACT`, `CHOPCONF`, `DRV_STATUS`, `PWMCONF`, `PWM_SCALE`, `PWM_AUTO`, `SG_RESULT`.
+4. Each line has the form `NAME        0000xxxx field=value field=value …`: register name, the 32-bit value in hexadecimal, then the decoded fields.
+
+The write-only registers come out in no fixed order (the firmware goes through its list without sorting).
+
+### Syntax
+
+```
+DUMP_TMC STEPPER=<name>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `STEPPER` | Motor / driver | see the table at the start of the chapter | none — required |
+
+The standard Klipper `REGISTER=` parameter (dump one register) is **not** available in this firmware: the command always dumps everything.
+
+### Examples
+
+```
+DUMP_TMC STEPPER=stepper_x
+```
+Shows all registers of the X driver: use `DRV_STATUS` (over-temperature, short circuits, stand-still), `SG_RESULT` (stall measure) and `IFCNT` (communication check, grows with each write).
+
+### Notes and cautions
+
+- All drivers of the printer share one serial line (`PA3` of the main board; the extruder driver sits on the nozzle board), so a dump takes a short while. It does not move anything.
+- If a driver does not answer, the value read is shown as is (or the command reports a communication error in the console — not examined).
+
+---
+
+### To verify (not tested on a printer)
+
+- Everything in this chapter comes from reading the firmware; no command was sent.
+- The exact console wording of the multiplexed-command errors (taken from chapter 13).
+- Effect on the motors of `OPEN_STEALTHCHOP` (`TCOOLTHRS` = FFFFF left in place) outside homing.
+- `SET_TMC_FIELD` on an out-of-range value and on a register field name list of the TMC2209 (the example names come from the standard TMC2209 field list).
+- Read-only way to check without risk: `DUMP_TMC STEPPER=stepper_x` on the idle printer.
+
+---
+
+*End of chapter 26.*
