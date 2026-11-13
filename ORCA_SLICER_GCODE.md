@@ -71,9 +71,9 @@ M7000 BED_MESH_CLEAR                    ; no mesh while homing / wiping / measur
 M7001 Step 2 of 8 - Homing, bed preheat started, nozzle to wipe temperature
 M140 S{min(bed_temperature_initial_layer_single, 60)}   ; start bed heating now, no waiting
 G28                               ; home X, Y, Z
-G1 Z15 F1200                     ; lift, then park beside the bed (X457): drips fall off the plate
-G1 X457 F9600
-M104 S170                         ; wipe temperature
+G1 Z15 F1200                     ; stay 15 mm up
+G1 X0 Y440 F9600                  ; heating spot: rear left, left of the wiper pad and behind the bed (the LeviQ3 parking spot, platform_offset_extru)
+M104 S170                         ; wipe temperature, heated right next to the pad
 M109 S170
 
 ; --- 3. Clean the nozzle on the wiper pad (the pad is off the bed: bed can still be heating)
@@ -82,11 +82,12 @@ G9113                             ; reset "nozzle already cleaned", otherwise G9
 G9112                             ; wipe (fan 100 %, 3 passes on the pad)
 M400
 M107
-G1 Z15 F1200                     ; lift off the pad and park beside the bed while it finishes heating
-G1 X457 F9600
+G1 Z15 F1200                     ; lift off the pad
+G1 X0 Y440 F9600                  ; back to the rear-left spot while the bed finishes heating
 
 ; --- 3b. Bed to preheat temperature, then 1 minute soak right before measuring --
 M7001 Step 4 of 8 - Waiting for the bed, then 1 minute heat soak
+M104 S140                         ; nozzle cools down to the LeviQ3 probing temperature (extru_end_temp) during the wait
 M190 S{min(bed_temperature_initial_layer_single, 60)}   ; wait until the bed is within 2 C of target
 G4 P60000                         ; 1 minute heat soak
 
@@ -138,14 +139,17 @@ G92 E0
 |---|---|---|
 | 0 | four `; print_bed_… / first_layer_…` comments | The firmware only builds an adaptive mesh when these four lines exist at the start of a line. The stock Anycubic slicer writes them the same way. The bed lines are fixed to the bed of this printer (426 × 420, from `bed_shape` of the sample files); the first-layer lines come from Orca. |
 | 1 | `CLEAR_PAUSE`, `BED_MESH_CLEAR` | Clean state. A leftover mesh would bend the wipe and the Z-offset moves. |
-| 2 | `M140` → `G28` → `M104/M109 S170` | The bed warms up while the printer homes and the nozzle heats, parked off the bed. |
-| 3 | `G9113`, `G9112`, then `M190` + `G4 P60000` | The wiper pad is off the bed, so the wipe happens while the bed is still heating. `G9112` does nothing when its "already cleaned" memory is set, so it is reset first; it also clears and reloads the mesh and switches the X/Y drivers around the wipe. Then `M190` (only waits until ±2 °C) and the 60 s soak, right before the measurements, so the bed is stable when the Z offset and mesh are taken. |
+| 2 | `M140` → `G28` → move to `X0 Y440` → `M104/M109 S170` | The bed warms up while the printer homes. The nozzle then heats to the wipe temperature at the rear-left spot, left of the wiper pad (X42–102) and behind the bed edge (Y420), so drips fall outside the bed. `X0 Y440` is the spot the vendor's own LeviQ3 preheat uses (`platform_offset_extru`, ch. 14). |
+| 3 | `G9113`, `G9112`, back to `X0 Y440`, `M104 S140`, `M190` + `G4 P60000` | The wiper pad is off the bed, so the wipe happens while the bed is still heating. `G9112` does nothing when its "already cleaned" memory is set, so it is reset first; it also clears and reloads the mesh and switches the X/Y drivers around the wipe. While the printer waits for the bed (`M190`, only to ±2 °C) and soaks for 60 s, the nozzle target is set to 140 °C (the probing temperature `extru_end_temp`), so it cools during the wait and `LEVIQ_AUTO_ZOFFSET` finds it already there. Soak and cooling happen right before the measurements. |
 | 4 | `LEVIQ_AUTO_ZOFFSET` | Cools the nozzle to 140 °C, homes Z, measures twice (and again after a forced wipe if the result looks suspiciously small), then applies and saves the probe `z_offset` (`IS_SAVE=1` is the default and the only reliable mode, ch. 14). |
 | 5 | `BED_MESH_CALIBRATE ADAPTIVE=1 …` | Measures only the first-layer area + 5 mm (minimum 100 × 100 mm, ch. 3). The profile is called `adaptive` so the full-bed `default` mesh that `G9112` reloads is not overwritten. The mesh is taken **after** the Z offset, so it is consistent with the new offset. |
 | 6 | `M140`, `TEMPERATURE_WAIT`, `M104`, `M190`, `M109`, `LEVIQ_TEMP_OFFSET` | The bed is set first; the nozzle starts once the bed is within 10 °C, so the end of the bed heat-up and the nozzle heat-up overlap but the nozzle never waits long at high temperature (no ooze). Then `M190`/`M109` wait for both, and the thermal Z correction `(T − 140) × 0.06 / 80` is applied. |
 | 7 | `M117`, purge line | `M117` is the firmware's print-start signal, not a message (ch. 5); Anycubic's own start code has it right after the preparation. The purge is the stock `UNDERLINE` idea (about 24 mm of filament, 0.3 mm high) but drawn from X30 to X180 on the front edge, entirely on the bed (the stock one starts at X457, outside it). |
 
 ### Things to know
+
+- **Cooling to 140 °C:** the value is `extru_end_temp` of the `[leviQ3]` section (stock 140). If you changed it, change the `M104 S140` line too. Passive cooling from 170 °C to 140 °C takes a minute or two; if it is not there when the soak ends, `LEVIQ_AUTO_ZOFFSET` just waits for the rest. To speed it up you can add `M106 S255` before the soak (the firmware turns the fan off itself in `LEVIQ_AUTO_ZOFFSET`).
+- **Heating spot `X0 Y440`:** it is outside the bed on the left of the wiper pad. If your wiper or a cable is in the way, change both `G1 X0 Y440` lines (X up to about 30 is still left of the pad; the fine-wipe spot of LeviQ3 is near X30 Y420, so do not park there).
 
 - **Why most commands are written as `M7000 <command>`: the print reader skips lines.** Found in the firmware (disassembly of the print-file reader, 2026-11-14) and consistent with every test on the printer: a line of a print file is only executed if it starts with `G`+digit, `T`+digit or `M`+digit (the exact line `M84` is refused), or with one of 12 prefixes (`SNAPSHOT`, `SET_IDLE_TIMEOUT`, `SET_VELOCITY_LIMIT`, `SET_PRESSURE_ADVANCE`, `SAVE_GCODE_STATE`, `RESTORE_GCODE_STATE`, `TUNING_TOWER`, `SHAPER_CALIBRATE`, `EXCLUDE_OBJECT_DEFINE`, `EXCLUDE_OBJECT_START`, `EXCLUDE_OBJECT_END`, `EXCLUDE_OBJECT`). **Every other line is silently dropped, with no error**: `BED_MESH_CALIBRATE`, `BED_MESH_CLEAR`, `LEVIQ_*`, `TEMPERATURE_WAIT`, `CLEAR_PAUSE`, `RESET_VELOCITY_LIMIT`, `ECHO`, `MOVE_HEAT_POS`, any custom macro. That is why your macro tests did nothing. Stock files only use lines that pass (`G9111` does the leveling work internally). A macro whose name starts with `M` + digit (like the stock `M486`) passes the filter, so the two macros of the one-time setup (`M7000`, `M7001`) are the way in. **(to verify on the printer: the macros were not run yet.)**
 - **Console messages** come from `M7001 <text>` (`action_respond_info` does reach the console). `ECHO` and `STATUS` only write to the log. There is no known command to show text on the printer's display; `M117` ignores its text.
