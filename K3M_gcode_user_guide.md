@@ -5141,3 +5141,136 @@ Cool everything down and release the motors in one command, for example at the e
 ---
 
 *End of chapter 22.*
+
+---
+
+# Chapter 23 — Print statistics: `M75`, `SET_PRINT_STATS_INFO`
+
+The firmware keeps a small "print statistics" record: file name, print state (`standby`, `printing`, `paused`, `complete`, `cancelled`, `error`), time since the print started, time actually spent printing, filament used, and the layer counters. The touchscreen, Mainsail and Moonraker read it as the object `print_stats`. Two commands act directly on it.
+
+| Command | Purpose |
+|---|---|
+| `M75` | Restart the "printing time" clock (the print-time counter starts again from zero) |
+| `SET_PRINT_STATS_INFO` | Tell the printer the total number of layers and the current layer (for display only) |
+
+Neither command moves anything, heats anything or prints a message.
+
+---
+
+## `M75` — Restart the print-time counter
+
+### What it does
+
+The record keeps two clocks: `total_duration` (time since the job started) and `print_duration` (time spent printing, without the preparation phase and without pauses). `print_duration` is computed as `total_duration − preparation time − time paused`.
+
+`M75` sets the **preparation time** to "everything since the job started". From this moment `print_duration` restarts from about zero. Its help text says "Start the print job timer", which is a little misleading: it does not start the job, it only moves the point where printing time is counted from.
+
+The preparation time is also recomputed by the firmware itself in the background, **as long as no filament has been extruded**: during heating, homing and levelling, `print_duration` stays at zero. After the first extrusion that value is frozen. As a result:
+
+- `M75` **before the first extrusion** has no lasting effect (the firmware recomputes the same value at the next status query).
+- `M75` **after the print has started extruding** resets `print_duration` to zero. `total_duration` is **not** changed.
+
+The firmware sends the same reset itself at the start of every print (it is part of what `M117` triggers, see chapter 5), so a normal print never needs `M75`.
+
+### Syntax
+
+```
+M75
+```
+
+### Parameters
+
+None. Parameters given are ignored.
+
+### Examples
+
+```
+M75
+```
+Restart the printing-time counter, for example at the end of a custom start code to hide a long purge or levelling phase in the time shown on the screen.
+
+### Notes and cautions
+
+- Only the displayed durations change. The remaining time shown on the screen comes from `M73` (chapter 22), not from this counter.
+- Sent while **no print is running**, the command sets the preparation time to a meaningless large number (the printer's clock value, since the "start time" is zero). The status can then show a negative `print_duration` until the next print starts (to verify, derived from the code, not tried). Do not send it outside a print.
+- Pauses are counted separately: the time paused is not part of `print_duration`, but `M75` forgets the time paused *before* it was sent (it is computed from the job start, not from earlier pauses; derived from the code, not tried).
+
+---
+
+## `SET_PRINT_STATS_INFO` — Total layers and current layer
+
+### What it does
+
+Stores two numbers in the print statistics so that screens can show "layer 12 / 240". The firmware does not compute them itself: the slicer must write the command into the G-code (usually in the start code for `TOTAL_LAYER`, and in the layer-change code for `CURRENT_LAYER`).
+
+The rules, in order:
+
+1. `TOTAL_LAYER` and `CURRENT_LAYER` default to the **values already stored**, so you may send only one of them.
+2. If the resulting total is **0**: both stored values are set to **0** (this is how to clear them).
+3. Otherwise, if the total is **different from the stored one**: the stored total is replaced and the stored current layer is reset to **0**.
+4. Then, if the stored total is not 0, the given current layer is **not 0** and it differs from the stored one: the stored current layer becomes the given value, **limited to the total** (`CURRENT_LAYER=300` with a total of 240 stores 240).
+
+The values appear in the status of `print_stats` as `info: { total_layer, current_layer }` (the live printer shows `info` with `current_layer: 0` and `total_layer: 0` after a file that never sent the command).
+
+### Syntax
+
+```
+SET_PRINT_STATS_INFO [TOTAL_LAYER=<n>] [CURRENT_LAYER=<n>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `TOTAL_LAYER` | Number of layers of the whole print | integer, normally ≥ 0; 0 clears both values | the stored value |
+| `CURRENT_LAYER` | Layer being printed now | integer, normally ≥ 0; 0 means "leave the stored layer as it is" (it cannot be used to go back to 0, except through `TOTAL_LAYER=0`) | the stored value |
+
+A negative number is **not refused**: the firmware only writes an error line in its log (`Error on 'SET_PRINT_STATS_INFO': TOTAL_LAYER must have minimum of 0`, same for `CURRENT_LAYER`; read from the code, not tried) and then uses the value as given, so a negative layer number would be stored and shown. Do not send negative numbers.
+
+### Examples
+
+```
+SET_PRINT_STATS_INFO TOTAL_LAYER=240
+```
+In the start code: announces a 240-layer print; the current layer is reset to 0.
+
+```
+SET_PRINT_STATS_INFO CURRENT_LAYER=12
+```
+In the layer-change code: layer 12 is now printed.
+
+```
+SET_PRINT_STATS_INFO TOTAL_LAYER=0
+```
+Clear both values.
+
+### Notes and cautions
+
+- The stored layer numbers are **not** the ones shown by the printer's own screen. The firmware keeps a second pair of layer numbers in the print-job reader (`virtual_sdcard` status: `total_layer`, `current_layer`), which comes from the G-code file itself (see "Where the touchscreen gets its layer numbers" below). `SET_PRINT_STATS_INFO` does not influence that pair, and that pair does not feed `print_stats.info`, which is what Mainsail displays.
+- Nothing found in the firmware sets these two values by itself and the sample files supplied with the firmware do not send the command, so a display of "layer x / y" works only if the slicer's G-code contains this command (to verify on the screen).
+### Where the touchscreen gets its layer numbers, and Orca
+
+Checked on Orca 2.5.0 files stored on the printer and in the firmware. Two independent layer counters exist:
+
+| Counter | Where it appears | Filled by |
+|---|---|---|
+| `virtual_sdcard.total_layer` / `current_layer` | the printer's touchscreen (it reads this; consistent with what you see) | the file itself, automatically |
+| `print_stats.info.total_layer` / `current_layer` | Mainsail (and Moonraker) | the firmware itself: only the `SET_PRINT_STATS_INFO` command; **on a Rinkhals printer, the Rinkhals Moonraker plugin overwrites it with the touchscreen counter** (see below) |
+
+**Touchscreen counter.** When a print is loaded the firmware scans the file (the first lines to find the slicer, then the last lines). The **total** is taken from any of these lines it finds: `; total layers count = N` (Orca writes it in the statistics block at the end of the file), `; total_layers = N`, `;LAYER_COUNT:N` (Cura), or, for the last `; AFTER_LAYER_CHANGE <n> @ <z>mm` line, `n + 1`. The **current layer** starts at 0 and goes up by one each time the printer reads a `;LAYER_CHANGE` or `;LAYER:` comment line while printing. Orca writes `;LAYER_CHANGE` itself at every layer, so nothing has to be configured for the screen. The header line `; total layer number: N` that Orca also writes is **not** read. The last `; AFTER_LAYER_CHANGE` line comes from the *Layer change G-code* of the Anycubic Orca profile (`; AFTER_LAYER_CHANGE [layer_num] @ [layer_z]mm`) and is a second source for the total.
+
+**Mainsail counter (Rinkhals).** The Orca files contain no `SET_PRINT_STATS_INFO`, so the firmware's own `print_stats.info` stays at 0/0. On your printer, however, Moonraker runs the Rinkhals plugin `kobra.py` (public source, function `patch_status`), which **rewrites every status update on its way to Mainsail**: whenever an update contains `virtual_sdcard.current_layer`, it copies that value into `print_stats.info.current_layer`, and it copies the last `virtual_sdcard.total_layer` it has seen into `info.total_layer`. So Mainsail shows the **same numbers as the touchscreen**, without any `SET_PRINT_STATS_INFO`. That explains the Cube observation: right after the job `info` was still `0/0`, and later it read `2/2` (nothing in the firmware changed it; the plugin fills it when an update carrying the layer values arrives, and a plain query returns Moonraker's cached copy). Nothing in the Moonraker command history shows `SET_PRINT_STATS_INFO`.
+
+Consequences:
+
+- With Rinkhals, **do not add `SET_PRINT_STATS_INFO` to Orca**: the plugin overwrites its values as soon as the next layer update arrives, so it brings nothing (and without the plugin the touchscreen would not need it either).
+- If Mainsail still shows wrong layers, the likely causes are in the plugin's bookkeeping, not in the G-code: it keeps the last `total_layer` it received, and resets it to 0 only when a print is started *through Moonraker/Mainsail*; a print started from the touchscreen after another job can keep showing the previous job's total until a new `total_layer` value is sent (inferred from the plugin code, not observed), and the cached `info` is only refreshed when a layer update arrives. What exactly Mainsail shows wrong (before the print, at start, off by one, total) would tell which one it is.
+- Orca-side, nothing to change for the layers: keep the Anycubic profile's *Layer change G-code* `; AFTER_LAYER_CHANGE [layer_num] @ [layer_z]mm` (a second source for the total) and keep Orca's own `;LAYER_CHANGE` comment (drives the current layer and the timelapse trigger). The header line `; total layer number: N` is not read by the firmware; the footer line `; total layers count = N` that Orca writes is.
+
+**On a printer without Rinkhals** (stock Anycubic firmware and Moonraker), a web interface only gets `print_stats.info` from `SET_PRINT_STATS_INFO`, so you would add `SET_PRINT_STATS_INFO TOTAL_LAYER=[total_layer_count]` to the *Machine start G-code* and `SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}` to the *Layer change G-code* (total first, because a new total resets the current layer to 0; Orca's `layer_num` starts at 0). Not tested (to verify).
+- Nothing found in the firmware clears the layer values at the end of a print; send `TOTAL_LAYER=0` or a new `TOTAL_LAYER` at the next job's start (to verify).
+- The command is only informative. Wrong values change nothing in the motion, the temperatures or the file position.
+
+---
+
+*End of chapter 23.*
