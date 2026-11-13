@@ -41,7 +41,8 @@ gcode:
 
 - `M7000 BED_MESH_CLEAR` runs `BED_MESH_CLEAR`; `M7001 hello` prints `hello` in the console. `action_respond_info` needs the second (unused) argument `""`, the template engine refuses a call with one.
 - **Test in this order:** type `M7001 hello` in the console, then run a print file with the three lines `M7001 hello from a file`, `M7000 M115`, `M7000 BED_MESH_OUTPUT`. You should get the message, the firmware line and the mesh answer.
-- Message text must not contain square brackets (Orca placeholders) and should avoid runs of four spaces.
+- **Message format rule.** The text after `M7001` must start with a **letter**, with no `(`, `/`, `*` or other symbols before the first word. The line parser reads an `M`/`G` command name up to the first letter, `/` or `*`, so `M7001 (1/8) Reset` becomes a command called `M7001 (1`, which does not exist, and the line is silently ignored (seen on the printer: the messages of the first Orca file never appeared). After the first word, plain text is fine. Also no square brackets (Orca placeholders) and no runs of four spaces.
+- The same rule applies to `M7000`: always write the command right after it, `M7000 BED_MESH_CLEAR`.
 - **(to verify)** `rawparams` and `|safe` come from the guide's description of the template engine and from the firmware code; nothing was run. `|safe` stops the engine from escaping quotes or `<`/`>`; the commands here contain none.
 
 ---
@@ -60,14 +61,14 @@ gcode:
 ; first_layer_print_max = {first_layer_print_max[0]},{first_layer_print_max[1]}
 
 ; --- 1. Reset the state --------------------------------------------------------
-M7001 (1/8) Reset state
+M7001 Step 1 of 8 - Reset state
 M7000 CLEAR_PAUSE                       ; forget a leftover "paused" state (G9111 does this too)
 M107                              ; part fan off
 G90                               ; absolute XYZ
 M7000 BED_MESH_CLEAR                    ; no mesh while homing / wiping / measuring the Z offset
 
 ; --- 2. Start the bed, home, heat the nozzle (all while the bed heats) ---------
-M7001 (2/8) Homing, bed preheat started, nozzle to wipe temperature
+M7001 Step 2 of 8 - Homing, bed preheat started, nozzle to wipe temperature
 M140 S{min(bed_temperature_initial_layer_single, 60)}   ; start bed heating now, no waiting
 G28                               ; home X, Y, Z
 G1 Z15 F1200                     ; lift, then park beside the bed (X457): drips fall off the plate
@@ -76,7 +77,7 @@ M104 S170                         ; wipe temperature
 M109 S170
 
 ; --- 3. Clean the nozzle on the wiper pad (the pad is off the bed: bed can still be heating)
-M7001 (3/8) Cleaning the nozzle
+M7001 Step 3 of 8 - Cleaning the nozzle
 G9113                             ; reset "nozzle already cleaned", otherwise G9112 does nothing
 G9112                             ; wipe (fan 100 %, 3 passes on the pad)
 M400
@@ -85,24 +86,24 @@ G1 Z15 F1200                     ; lift off the pad and park beside the bed whil
 G1 X457 F9600
 
 ; --- 3b. Bed to preheat temperature, then 1 minute soak right before measuring --
-M7001 (4/8) Waiting for the bed, then 1 minute heat soak
+M7001 Step 4 of 8 - Waiting for the bed, then 1 minute heat soak
 M190 S{min(bed_temperature_initial_layer_single, 60)}   ; wait until the bed is within 2 C of target
 G4 P60000                         ; 1 minute heat soak
 
 ; --- 4. LeviQ3 automatic Z offset ----------------------------------------------
-M7001 (5/8) Measuring the Z offset (LeviQ3)
+M7001 Step 5 of 8 - Measuring the Z offset (LeviQ3)
 M7000 BED_MESH_CLEAR
 M7000 LEVIQ_AUTO_ZOFFSET                ; nozzle to 140 C, G28 Z, strain-gauge measurement, saved
 M400
 G9113                             ; leave the "cleaned" memory reset (G9111 does the same)
 
 ; --- 5. Adaptive bed mesh (nozzle is at 140 C, bed at the preheat temperature) --
-M7001 (6/8) Measuring the adaptive bed mesh
+M7001 Step 6 of 8 - Measuring the adaptive bed mesh
 M7000 BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=5 PROFILE=adaptive
 M400
 
 ; --- 6. Bed to print temperature, then nozzle ----------------------------------
-M7001 (7/8) Heating to print temperatures
+M7001 Step 7 of 8 - Heating to print temperatures
 G1 Z15 F1200
 G1 X457 F9600                     ; park beside the bed again
 M140 S[bed_temperature_initial_layer_single]
@@ -114,7 +115,7 @@ M7000 LEVIQ_TEMP_OFFSET                 ; Z correction for the hot nozzle (the o
 M400
 
 ; --- 7. Purge line, starting ON the bed ----------------------------------------
-M7001 (8/8) Purge line, starting the print
+M7001 Step 8 of 8 - Purge line, starting the print
 M117                              ; REQUIRED by the firmware: print-start signal (X/Y to SpreadCycle, timer reset)
 G90
 M83                               ; relative E (LEVIQ_AUTO_ZOFFSET leaves absolute mode on)
@@ -170,12 +171,12 @@ M83                               ; relative E for the retract
 G1 E-1.5 F1800                    ; small retract (Orca may already have retracted)
 
 ; --- Cool down -------------------------------------------------------------------
-M7001 (1/3) Print finished: heaters off
+M7001 Step 1 of 3 - Print finished: heaters off
 M104 S0                           ; nozzle heater off
 M140 S0                           ; bed heater off
 
 ; --- Present the print ------------------------------------------------------------
-M7001 (2/3) Presenting the print
+M7001 Step 2 of 3 - Presenting the print
 G90
 G1 Z{min(max_layer_z + 30, 500)} F1200   ; lift 30 mm above the print (Z max is 502)
 M400
@@ -183,7 +184,7 @@ G1 X0 Y420 F9600                  ; head rear-left = bed fully forward, same spo
 M400
 
 ; --- Clean up and shut down -------------------------------------------------------
-M7001 (3/3) Fan and steppers off
+M7001 Step 3 of 3 - Fan and steppers off
 M7000 RESET_VELOCITY_LIMIT              ; back to the configured speed/acceleration limits
 M107                              ; part-cooling fan off
 M84                               ; steppers off (the axes become "not homed")
