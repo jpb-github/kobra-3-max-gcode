@@ -1,3 +1,11 @@
+# SECURITY: passwords.txt (and any password/secret/credential file) must NEVER be committed.
+# These rules are listed first on purpose; do not remove them or force-add (git add -f) such files.
+passwords.txt
+**/passwords.txt
+*password*
+*secret*
+*credential*
+
 # Track only the Markdown documents; ignore everything else
 # (firmware files, analysis scripts/data, the cloned Klipper-go source).
 *
