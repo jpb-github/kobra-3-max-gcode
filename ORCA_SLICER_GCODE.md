@@ -39,14 +39,14 @@ Also check, in the same printer profile:
 ; first_layer_print_max = {first_layer_print_max[0]},{first_layer_print_max[1]}
 
 ; --- 1. Reset the state --------------------------------------------------------
-ECHO [1/8] Reset state
+ECHO (1/8) Reset state
 CLEAR_PAUSE                       ; forget a leftover "paused" state (G9111 does this too)
 M107                              ; part fan off
 G90                               ; absolute XYZ
 BED_MESH_CLEAR                    ; no mesh while homing / wiping / measuring the Z offset
 
 ; --- 2. Start the bed, home, heat the nozzle (all while the bed heats) ---------
-ECHO [2/8] Homing, bed preheat started, nozzle to wipe temperature
+ECHO (2/8) Homing, bed preheat started, nozzle to wipe temperature
 M140 S{min(bed_temperature_initial_layer_single, 60)}   ; start bed heating now, no waiting
 G28                               ; home X, Y, Z
 MOVE_HEAT_POS                     ; Z15, then X457: nozzle beside the bed, drips fall off the plate
@@ -54,7 +54,7 @@ M104 S170                         ; wipe temperature
 M109 S170
 
 ; --- 3. Clean the nozzle on the wiper pad (the pad is off the bed: bed can still be heating)
-ECHO [3/8] Cleaning the nozzle
+ECHO (3/8) Cleaning the nozzle
 G9113                             ; reset "nozzle already cleaned", otherwise G9112 does nothing
 G9112                             ; wipe (fan 100 %, 3 passes on the pad)
 M400
@@ -62,24 +62,24 @@ M107
 MOVE_HEAT_POS                     ; lift off the pad and park again while the bed finishes
 
 ; --- 3b. Bed to preheat temperature, then 1 minute soak right before measuring --
-ECHO [4/8] Waiting for the bed, then 1 minute heat soak
+ECHO (4/8) Waiting for the bed, then 1 minute heat soak
 M190 S{min(bed_temperature_initial_layer_single, 60)}   ; wait until the bed is within 2 C of target
 G4 P60000                         ; 1 minute heat soak
 
 ; --- 4. LeviQ3 automatic Z offset ----------------------------------------------
-ECHO [5/8] Measuring the Z offset (LeviQ3)
+ECHO (5/8) Measuring the Z offset (LeviQ3)
 BED_MESH_CLEAR
 LEVIQ_AUTO_ZOFFSET                ; nozzle to 140 C, G28 Z, strain-gauge measurement, saved
 M400
 G9113                             ; leave the "cleaned" memory reset (G9111 does the same)
 
 ; --- 5. Adaptive bed mesh (nozzle is at 140 C, bed at the preheat temperature) --
-ECHO [6/8] Measuring the adaptive bed mesh
+ECHO (6/8) Measuring the adaptive bed mesh
 BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=5 PROFILE=adaptive
 M400
 
 ; --- 6. Bed to print temperature, then nozzle ----------------------------------
-ECHO [7/8] Heating to print temperatures
+ECHO (7/8) Heating to print temperatures
 MOVE_HEAT_POS
 M140 S[bed_temperature_initial_layer_single]
 TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={bed_temperature_initial_layer_single - 10}   ; bed within 10 C
@@ -90,7 +90,7 @@ LEVIQ_TEMP_OFFSET                 ; Z correction for the hot nozzle (the offset 
 M400
 
 ; --- 7. Purge line, starting ON the bed ----------------------------------------
-ECHO [8/8] Purge line, starting the print
+ECHO (8/8) Purge line, starting the print
 M117                              ; REQUIRED by the firmware: print-start signal (X/Y to SpreadCycle, timer reset)
 G90
 M83                               ; relative E (LEVIQ_AUTO_ZOFFSET leaves absolute mode on)
@@ -122,7 +122,8 @@ G92 E0
 
 ### Things to know
 
-- **Console messages:** each step starts with an `ECHO` line. The firmware repeats the whole line, so Mainsail shows `ECHO [3/8] Cleaning the nozzle` (the word `ECHO` cannot be removed, ch. 5). There is no known command to show text on the printer's own display; `M117` ignores its text.
+- **Console messages:** each step starts with an `ECHO` line. The firmware repeats the whole line, so Mainsail shows `ECHO (3/8) Cleaning the nozzle` (the word `ECHO` cannot be removed, ch. 5). There is no known command to show text on the printer's own display; `M117` ignores its text.
+- **Never use square brackets in message text.** Orca treats `[...]` in any custom G-code (comments included) as a placeholder and refuses to slice with "Expecting a legacy variable expansion format". The messages therefore use parentheses: `(3/8)`.
 - **Do not turn the automatic Z offset off** (`LEVIQ_AUTO_ZOFFSET_ON_OFF ON_OFF=0`) while keeping this start code: `LEVIQ_TEMP_OFFSET` would then add its correction to the saved offset at every print. With the measurement on, `LEVIQ_AUTO_ZOFFSET` zeroes the offsets first, so nothing accumulates.
 - **`LEVIQ_AUTO_ZOFFSET` and `LEVIQ_TEMP_OFFSET` both run `SAVE_CONFIG`** (on this printer the values go to `printer_mutable.cfg`). That is the same as the stock `G9111`, but it means the config file is rewritten at each print.
 - **`LEVIQ_TEMP_OFFSET` takes the print temperature from the file** (header `; nozzle_temperature =` / `; first_layer_temperature =` or an `M109 S…` line). The `M109 S…` line of step 6 is there, so it is found **(to verify which source wins)**.
@@ -140,7 +141,7 @@ G92 E0
 ```gcode
 ; ===== Kobra 3 Max - Orca machine end G-code =====
 M400                              ; finish the last moves
-ECHO [1/3] Print finished: retract, heaters off
+ECHO (1/3) Print finished: retract, heaters off
 M83                               ; relative E for the retract
 G1 E-1.5 F1800                    ; small retract (Orca may already have retracted)
 
@@ -149,7 +150,7 @@ M104 S0                           ; nozzle heater off
 M140 S0                           ; bed heater off
 
 ; --- Present the print ------------------------------------------------------------
-ECHO [2/3] Presenting the print
+ECHO (2/3) Presenting the print
 G90
 G1 Z{min(max_layer_z + 30, 500)} F1200   ; lift 30 mm above the print (Z max is 502)
 M400
@@ -157,7 +158,7 @@ G1 X0 Y420 F9600                  ; head rear-left = bed fully forward, same spo
 M400
 
 ; --- Clean up and shut down -------------------------------------------------------
-ECHO [3/3] Fan and steppers off
+ECHO (3/3) Fan and steppers off
 RESET_VELOCITY_LIMIT              ; back to the configured speed/acceleration limits
 M107                              ; part-cooling fan off
 M84                               ; steppers off (the axes become "not homed")
