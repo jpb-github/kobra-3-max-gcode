@@ -5530,4 +5530,25 @@ Five commands used by Anycubic's production tests. They are **not for normal use
 
 ---
 
+## Link with the LeviQ3 commands (chapter 14)
+
+The LeviQ3 auto-leveling commands are built on the probe described in this chapter. Both end up measuring with the same strain sensor.
+
+| LeviQ3 command | What it uses from this chapter |
+|---|---|
+| `LEVIQ_PROBE` | Runs `BED_MESH_CALIBRATE ADAPTIVE=1` (chapter 3); every mesh point is a probing like `PROBE`. The `[probe]` settings apply: speed 6 mm/s, 2 samples, `weighted` result, tolerance 0.04 mm, 20 retries. |
+| `LEVIQ_AUTO_ZOFFSET` | Does **not** use `PROBE`: it steps Z and reads the strain sensor itself. It ends by calling `Z_OFFSET_APPLY_PROBE`, which stores the result as the probe `z_offset`. |
+| `LEVIQ_TEMP_OFFSET`, `LEVIQ_SET_ZERO` | Adjust the probe `z_offset` and the G-code Z offset, the same mechanism as `Z_OFFSET_APPLY_PROBE`. |
+| `LEVIQ`, `LEVIQ_PREHEATING`, `LEVIQ_WIPING` | No direct link: they only prepare the nozzle and bed (heating, wiping) so that probing is accurate. |
+
+Where the two meet:
+
+- **Failed sample series.** `LEVIQ_PROBE` catches the console error `Probe samples exceed samples_tolerance` (the retries of `PROBE` are used up) and a cancel request. For these it returns its own error instead of the raw message, and for any other failure a generic error; in all cases it switches the strain-sensor chip off. A dirty nozzle that makes the samples disagree therefore ends the leveling with a probe error rather than a half-finished mesh. The exact error codes behind it were not read (to verify).
+- **Offset events.** `Z_OFFSET_APPLY_PROBE` sends the event `leviq:sync_zoffset`; the LeviQ3 module listens to it and updates its own copy of the offset.
+- **Duplicate probing code.** The LeviQ3 module contains its own copy of the probing routine: it reads the same parameter names as `PROBE`, uses the same `weighted` / `median` calculation, and adds a `G90`, a wait and a dwell between samples. Whether `BED_MESH_CALIBRATE ADAPTIVE=1` runs the standard routine or this copy was **not confirmed** (the link is a method reference whose caller was not found); either way the `[probe]` settings apply (to verify).
+
+**Practical consequence:** the probe settings used by `LEVIQ_PROBE` are the ones a bare `PROBE` uses, so `PROBE_ACCURACY` at a spot of the bed shows how reliable the leveling will be there.
+
+---
+
 *End of chapter 24.*
