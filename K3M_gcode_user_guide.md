@@ -5552,3 +5552,118 @@ Where the two meet:
 ---
 
 *End of chapter 24.*
+
+---
+
+# Chapter 25 — Queries
+
+Three read-only commands that report the state of the printer's electronics: the end-of-travel (endstop) switches and the analog inputs (ADC). They move nothing and change no setting.
+
+**Important: in this firmware version none of the three works as intended** (found by reading the code, not yet confirmed on the printer; see "To verify" at the end of the chapter). Do not rely on them for diagnosis.
+
+| Command | What it should do | What it does in this firmware |
+|---|---|---|
+| `M119` | Report the state of every endstop | Same command as `QUERY_ENDSTOPS`: ends with a console error as soon as at least one endstop is registered (to verify) |
+| `QUERY_ENDSTOPS` | Report the state of every endstop | Same as above |
+| `QUERY_ADC NAME=<adc>` | Report the last value of an analog input | Never gives a value: always answers with the list of ADC names, preceded by empty entries |
+
+---
+
+## `QUERY_ENDSTOPS` / `M119` — Endstop state
+
+`M119` and `QUERY_ENDSTOPS` are the same command (`M119` is the usual name used by slicers and host programs, and has no help text).
+
+### What it should do
+
+1. Wait until the planned moves are finished being prepared (the move queue is flushed up to the last planned move).
+2. Ask each endstop of the printer for its state at that moment.
+3. Print one line, `name:state` per endstop separated by spaces, for example `x:open y:open z:open`. `open` = not pressed / not triggered, `TRIGGERED` = pressed / triggered.
+
+### What it does in this firmware
+
+Step 1 runs, then the command stops with an internal type error ("interface conversion", shown in the console) on the **first** endstop, so no line is printed. It is a plain console error: the printer does **not** go into shutdown and nothing else is affected. Why: the code reading the list of endstops expects a different kind of entry than the one that was stored. It is the same fault as in the public source code of this program (which this firmware never fixed).
+
+The printer registers its endstops through the rails of the three axes (stock names `x`, `y`, `z`), so on a stock configuration `M119` is affected. If a configuration had no endstop at all, the command would print an empty line.
+
+### Syntax
+
+```
+M119
+QUERY_ENDSTOPS
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+M119
+```
+Expected on a normal Klipper machine: `x:open y:open z:open`. On this firmware: console error, no result.
+
+### Notes and cautions
+
+- **The three endstops are not mechanical switches.** In the stock configuration X and Y use the stepper drivers' "virtual endstop" (a motor stall is detected) and Z uses the probe (the strain sensor under the nozzle: `probe:z_virtual_endstop`). So even a working `M119` would show the driver/probe state, not a switch you can press. `TRIGGERED` outside homing is not something you can interpret like a switch.
+- **The status read by the web interface** (the Moonraker/Mainsail request `query_endstops/status`, and the `query_endstops` object) is also unreliable: it uses the same list, and the code that turns the state into `open` / `TRIGGERED` compares the endstop *name* instead of its state, so every endstop comes out as `TRIGGERED`. A test on the idle printer (2026-11-13) with this web request returned `{"x": "TRIGGERED", "y": "TRIGGERED", "z": "TRIGGERED"}`, which fits this explanation but is also what a really triggered state would look like (to verify: the three values are not proof).
+- To check the Z/probe sensor, `QUERY_PROBE` (chapter 24) is the working command: it reads the probe state and reports `open` / `TRIGGERED` for the probe.
+- Querying the state calls the flush of the move queue, so with moves still queued the command waits for them. It never moves the head.
+
+---
+
+## `QUERY_ADC` — Last value of an analog input
+
+### What it should do
+
+1. Take the name of an analog input registered by the printer (typically the temperature sensors: nozzle thermistor, bed thermistor, MCU temperature, …).
+2. Print `ADC object "<name>" has value <v> (timestamp <t>)`: `v` is the last reading as a fraction of full scale (0.000000 to 1.000000) and `t` the time of that reading in seconds.
+3. With `PULLUP=<ohms>`, add a second line ` resistance <r> (with <pullup> pullup)` with the resistance of the sensor that would give this reading.
+4. With an unknown name, list the available names.
+
+### What it does in this firmware
+
+1. `NAME` is read (missing NAME → error `Error on 'QUERY_ADC': missing NAME` in the console).
+2. The code tests the name the wrong way round and decides that the name is *never* known. Whatever you type — an existing name, a wrong one, nothing meaningful — it ends with step 4.
+3. It prints `Available ADC objects: ` followed by the names, sorted alphabetically, separated by `, `. Because of a second mistake in the list building, the names are **preceded by as many empty entries as there are ADC objects** (two ADCs would give `Available ADC objects: , , heater_bed, extruder`-like output with two leading `, `).
+4. No value is ever read and `PULLUP` is never evaluated.
+
+So the only use of the command in this firmware is to see which ADC names exist (after skipping the commas).
+
+### Syntax
+
+```
+QUERY_ADC NAME=<adc name> [PULLUP=<ohms>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `NAME` | Name of the analog input | A name registered by the printer | none — required |
+| `PULLUP` | Pull-up resistor of the sensor circuit, to compute a resistance | Number (ohms); 0 = no resistance | 0 |
+
+### Examples
+
+```
+QUERY_ADC NAME=list
+```
+Not an ADC name, so it prints the list of names (this is also what any valid name does in this firmware).
+
+### Notes and cautions
+
+- **If the value reading worked**, `PULLUP` would still give a wrong resistance: the formula limits the reading with the wrong bound, so the result would be `PULLUP × 99999` for any reading below 1.0 (and a division by zero at exactly 1.0). The usual resistance formula is `PULLUP × v / (1 − v)`. Do not trust a resistance computed by this command.
+- For temperatures, use `M105` (chapter 11), which works and gives the converted values.
+- Which ADC names are registered was not determined (the registration is done through an indirect call that was not traced). Sensor names in the configuration (`extruder`, `heater_bed`, …) are the usual ones in Klipper.
+
+---
+
+### To verify (not tested on a printer)
+
+- `M119` ending with a console error (and not printing): the fault was read in the disassembly (stored entry = pointer to a list, read back as a list value), and the idle printer answered to the web request but this was a different code path. A single `M119` on the idle printer would confirm it (it is read-only).
+- `QUERY_ADC NAME=extruder` (or any name) printing only `Available ADC objects: …`; if it prints a value instead, the analysis of the test is wrong.
+- The names registered as ADC objects.
+
+---
+
+*End of chapter 25.*
