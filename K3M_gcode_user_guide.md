@@ -4589,3 +4589,225 @@ Update the main board.
 ---
 
 *End of chapter 20.*
+
+---
+
+# Chapter 21 — Pause, resume and cancel
+
+Seven commands control a print that is running. They share one "paused" state of the printer; most of the real work (parking, cooling, re-priming) is done by background listeners that the commands trigger.
+
+| Command | Purpose |
+|---|---|
+| `PAUSE` | Pause the print: lift, retract, park, nozzle to 140 °C |
+| `M600` | Exactly the same as `PAUSE` (filament change) |
+| `M601` | Exactly the same as `PAUSE` (the Anycubic slicer's pause G-code) |
+| `RESUME` | Reheat, re-prime, go back to the saved position and continue |
+| `CANCEL_PRINT` | Stop the print and run the clean-up (heaters off, lift, park, motors off) |
+| `SET_PAUSE` | Only mark the printer as "paused" (no movement) |
+| `CLEAR_PAUSE` | Only remove the "paused" mark (no movement, nothing resumes) |
+
+`M600`/`M601` have **no parameters** (no `X Y Z E L`, no message): anything written after them is ignored. There is **no `M25`** in this firmware (see chapter 22 for the print-job commands).
+
+Settings used (section `[pause_resume]` of `printer.cfg`, and the filament-hub section `[filament_hub]`):
+
+| Setting | Stock value | Used for |
+|---|---|---|
+| `pause_resume` → `pause_position` | `457,420` | Park position; **only the X value (457) is used** by the pause |
+| `pause_resume` → `recover_velocity` | not in stock file, default **50** mm/s | Speed of the return move of `RESUME` when `VELOCITY` is not given |
+| `filament_hub` → `pre_sweep_position` / `sweep_position` | 457 / 445 | The X positions between which the head wipes before re-priming |
+| `filament_hub` → `cruising_speed` | 200 mm/s | Speed of the long travel moves of pause/resume |
+| `filament_hub` → `delay_before_throw` | 3 s | Pause after the re-priming (see `RESUME`) |
+| `filament_hub` → `sweep_fan_speed` | not in stock file, default 0 | Fan speed during that short pause (0 = fan off) |
+
+(`z_up: 10`, `extru_pull: 4` and `bee_path` in `[pause_resume]` are **not used** by these commands; the lift of 10 mm and the retraction of 2 mm are fixed values in the firmware.)
+
+---
+
+## `PAUSE` / `M600` / `M601` — Pause the print
+
+### What it does
+
+All three names run the same code.
+
+1. If the printer is **already paused**, it only prints `Print already paused` and does nothing else.
+2. Otherwise it stops the print job from reading further lines (a line already being executed finishes) and, if no file is being printed, announces the pause to the interface instead (`action:paused`).
+3. It saves the current G-code state under the name `PAUSE_STATE` (like `SAVE_GCODE_STATE NAME=PAUSE_STATE`, chapter 19): position, speed, speed factor, extrusion factor, absolute/relative modes.
+4. It marks the printer as paused and sets the print state to **paused**.
+5. It then triggers the pause listener, which performs the physical pause (in this order):
+   1. remembers the **fan speed**, the **nozzle target temperature** and the **X/Y/Z position**;
+   2. switches the **part-cooling fan off**;
+   3. sets the nozzle target to **140 °C** — it does **not** wait for the nozzle to cool; the bed stays at its temperature;
+   4. if X, Y and Z are all homed: (a) when the file is printed *object by object* and it declares its tallest height (`; max_z_height:` line), the head first goes up to that height at 30 mm/s so it clears every object; (b) **retracts 2 mm** of filament at 30 mm/s; (c) **lifts Z by 10 mm** at 30 mm/s; (d) **moves X to 457** (the `pause_position` X value) at 200 mm/s — Y is not changed;
+   5. waits until all these moves are finished.
+   If the axes are not all homed, steps (a)–(d) are skipped (the fan and the temperature change still happen).
+   (With the ACE multicolour hub connected the listener also stops the feed assist and activates the RFID reader; not detailed.)
+
+Nothing is printed to the console on success.
+
+### Syntax
+
+```
+PAUSE
+M600
+M601
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+M600
+```
+In a G-code file, at the layer where you want to change filament. The nozzle parks on the right, cooled to 140 °C.
+
+```
+M601
+```
+What the Anycubic slicer inserts for its "pause at layer" function (`machine_pause_gcode = M601`).
+
+### Notes and cautions
+
+- **A filament change is not automated.** There is no unload or load: only a 2 mm retraction. You unload and load the new filament yourself while parked (use the touchscreen or `EXTRUDE_FILAMENT`-type functions); the nozzle is at 140 °C, which is too cold to push most filaments — the heating back up happens only in `RESUME`.
+- The paused state does not time out in anything that was found. Leaving the nozzle at 140 °C is safe for the nozzle, but filament left sitting in it may ooze or degrade.
+- If the pause is sent while the printer is **not printing a file** (for example from the console), the same movements are made if the axes are homed; `RESUME` then restores the saved position.
+- **Pause outside a print.** The filament hub keeps a state number (0 idle, 1 printing, 2 paused). It is set to 1 when a print file starts, after a power-loss recovery and after a resume; a print end or cancel sets it to 0. `PAUSE` always does the fan, temperature and movements, but only switches the hub to "paused" when it was "printing". When the hub was **not** "printing" (for example `PAUSE` typed in the console with no print), `RESUME` still reheats the nozzle (`M109`) and then restores the saved state, but **skips the wipe, the 80 mm purge, the delay and the separate X/Z return** (verified in the code; not tested on the printer).
+
+---
+
+## `RESUME` — Continue after a pause
+
+### What it does
+
+1. If the printer is **not paused**: prints `Resume aborted: print is not paused` and stops.
+2. Triggers the re-start listener, which does, in this order (standalone spool, **no ACE hub**):
+   1. if a nozzle temperature was remembered at the pause: the head wipes back and forth between X 445 and X 457 (long moves at 200 mm/s, wipes at 20 mm/s) — this is done for the Kobra 3, 3 V2, 3 Max and 3 Max V2 — then **`M109`** heats the nozzle back to the remembered temperature and **waits for it**;
+   2. **extrudes 80 mm of filament at 5 mm/s** (about 16 s) to purge the old colour/air and refill the nozzle, and waits for the move to end;
+   3. if `delay_before_throw` is above 0 (3 s stock): sets the fan to `sweep_fan_speed` (0 = off, stock) and **waits that many seconds** (lets the strand drop);
+   4. restores the **fan speed** it had before the pause;
+   5. moves X back to its pre-pause X (at 200 mm/s) and then Z back to its pre-pause Z (at 10 mm/s).
+3. Restores the saved state with `RESTORE_GCODE_STATE NAME=PAUSE_STATE MOVE=1 MOVE_SPEED=<speed>` (chapter 19): returns to the exact saved X/Y/Z position and gives back speed, factors and modes. Because of the rule described in chapter 19, the extruder's G-code position is put back to the value it had at the pause, so the 80 mm that were purged do not count as printed filament (inferred from that rule, not tested).
+4. Restarts the reading of the print file, clears the paused mark, and the print continues.
+
+### Syntax
+
+```
+RESUME [VELOCITY=<mm/s>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `VELOCITY` | Speed of the return move to the saved position (step 3), in **mm/s**. | number > 0 | the `recover_velocity` setting, **50** mm/s when not set |
+
+### Examples
+
+```
+RESUME
+```
+Continue after you changed the filament.
+
+```
+RESUME VELOCITY=20
+```
+Same, with a slower return to the print position (useful if the nozzle has to pass close to the part).
+
+### Notes and cautions
+
+- Before sending `RESUME`, **load the new filament up to the nozzle**: the re-priming only pushes 80 mm at 5 mm/s without checking anything. If the filament is not in the extruder gears, nothing comes out.
+- The nozzle returns from above (Z +10 mm was kept until the final move), but check that nothing (stringing, a blob) is in the way of the return move.
+- With the ACE hub connected the sequence is different (the hub handles purge and feed); not detailed here since it is not used.
+- **To verify:** the 80 mm / 5 mm/s values and the order of the steps are read from the code; they were not timed on a real pause. Whether the `VELOCITY` value is accepted as 0 or negative was not examined.
+
+---
+
+## `CANCEL_PRINT` — Cancel the print
+
+### What it does
+
+1. If a print file is active (or the printer is paused), it **cancels** the print job: stops the reader, closes the file and runs the clean-up below. Otherwise this step is skipped.
+2. Clears the paused marks.
+3. Deletes the **power-loss recovery record** of the print (so the printer will not offer to resume this print after a power cut).
+
+The clean-up of step 1 does, in order:
+
+1. runs `G9113` (nozzle-clean counter/state, chapter 2);
+2. resets speed to 25 mm/s, speed factor 100 %, extrusion factor 100 %, speed mode 1, absolute positioning (`G90`) and absolute extrusion (`M82`) — the same as `M222` (chapter 19);
+3. resets the velocity limits to the configured ones (`RESET_VELOCITY_LIMIT`, chapter 28) and sets the extruder position to 0 (`G92 E0`);
+4. **switches off all heaters and the fan**;
+5. waits until the current moves end; **if X, Y, Z are homed**: when the file was printed object by object, goes up to the tallest height (`max_z_height`) at 30 mm/s; then **lifts Z by 15 mm** (from the current height) at 15 mm/s; then runs the `MOVE_END_POS` macro (X 0, Y 420 — see chapter 16);
+6. **turns the motors off** (like `M84`, so the axes become "not homed");
+7. re-enables the stealth mode of the X and Y motors (`OPEN_STEALTHCHOP`, chapter 26) and sets `M900 K0.02`;
+8. deletes the power-loss record and forgets the adaptive-mesh information of the file.
+
+If the cancel comes from the **touchscreen or web interface** (not from G-code), the interface first prints `cancel_request:stopping`, runs `TURN_OFF_HEATERS`, and only then runs `CANCEL_PRINT`; when the printer state is a calibration (flow calibration, resonance test, leveling), the interface runs `CANCEL_PRINT` directly, at once, inside whatever is running; in every other state it goes through the normal G-code queue (waits for the command in progress, and raises the internal "before/after cancel" events). The cancel itself is the same in both cases. Either way the interface finishes by signalling the end of the cancel (so the interface can reset its own state).
+
+### Syntax
+
+```
+CANCEL_PRINT
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+CANCEL_PRINT
+```
+Abort the print from the console. The heaters turn off, the head lifts 15 mm and goes to X 0 / Y 420, then the motors are released.
+
+### Notes and cautions
+
+- Because the motors are released, **the printer must be homed again** (`G28`) before any other movement.
+- The cancel is irreversible: the recovery record is deleted, so a print cancelled this way cannot be resumed.
+- With the multicolour hub the cancel also retracts and unwinds the filament (not detailed).
+- `M900 K0.02` puts the pressure advance back to the stock value 0.02 after every cancel (the same value as `pressure_advance` in `printer.cfg`); at the same point the result of any `PA_AUTO_CALIBRATE` is erased, so the `K` ignore rule of chapter 7 stops applying (see chapters 4 and 7). A `K` value set in your own G-code is therefore lost at the cancel.
+
+---
+
+## `SET_PAUSE` — Mark the printer as paused
+
+### What it does
+
+Only sets the two internal "paused" flags to true. **No move, no state saving, no print-job pause.** It exists so other code (for example a filament-runout handler) can declare that the printer is paused; without a saved `PAUSE_STATE`, a later `RESUME` would restore whatever state was saved before.
+
+### Syntax / parameters
+
+```
+SET_PAUSE
+```
+No parameters.
+
+### Notes and cautions
+
+- For a normal pause use `PAUSE`. Using `SET_PAUSE` by hand makes `RESUME` possible and `PAUSE` answer "already paused", but nothing is actually stopped.
+
+---
+
+## `CLEAR_PAUSE` — Remove the "paused" mark
+
+### What it does
+
+Clears the two "paused" flags without resuming anything and without moving. The `G9111` print-start macro (chapter 2) runs it at the beginning of each print so that a forgotten pause cannot affect the new print.
+
+### Syntax / parameters
+
+```
+CLEAR_PAUSE
+```
+No parameters.
+
+### Notes and cautions
+
+- It does **not** restart a print job that was paused, and does not reheat the nozzle. Use `RESUME` for that.
+- If the print was paused by `PAUSE` and you use `CLEAR_PAUSE`, the print stays stopped but the printer believes it is not paused: `RESUME` then answers "print is not paused". Use `CANCEL_PRINT` to get out.
+
+---
+
+*End of chapter 21.*
