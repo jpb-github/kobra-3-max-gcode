@@ -5274,3 +5274,260 @@ Consequences:
 ---
 
 *End of chapter 23.*
+
+---
+
+# Chapter 24 — Probe: `PROBE`, `PROBE_ACCURACY`, `QUERY_PROBE`, `PROBE_CALIBRATE`, manual probing (`TESTZ`, `ACCEPT`, `NEXT`, `ABORT`), `Z_OFFSET_APPLY_PROBE`, factory tests `G9100`–`G9104`
+
+The *probe* is the sensor that finds the bed surface. On the Kobra 3 Max it is the strain sensor of the nozzle (the same one `LEVIQ_AUTO_ZOFFSET` uses, chapters 8 and 14; the `[probe]` section of `printer.cfg` is on pin `PB15`, no X/Y offset: the probe point **is** the nozzle position). Almost all of this chapter is the standard Klipper probe code with a few Anycubic changes; the differences are called out.
+
+Stock `[probe]` values (`printer.cfg`): `speed` 6 mm/s, `lift_speed` 12 mm/s, `samples` 2, `sample_retract_dist` 2 mm, `samples_result` `weighted`, `samples_tolerance` 0.04 mm, `samples_tolerance_retries` 20, `x_offset`/`y_offset` 0. The `z_offset` is **not** in the stock file (it is commented out); the live value is stored by `SAVE_CONFIG` in the printer's own configuration file (`printer_mutable.cfg`).
+
+| Command | Purpose |
+|---|---|
+| `PROBE` | Lower the nozzle at the current X/Y until it touches the bed; report the Z |
+| `PROBE_ACCURACY` | Repeat the probing at the current X/Y and print statistics |
+| `QUERY_PROBE` | Report whether the probe is currently triggered |
+| `PROBE_CALIBRATE` | Calibrate the probe's `z_offset` by hand (paper test) |
+| `TESTZ`, `ACCEPT`, `NEXT`, `ABORT` | The manual-probing helper commands (only exist during a manual probe) |
+| `Z_OFFSET_APPLY_PROBE` | Turn the current G-code Z offset into the saved probe `z_offset` |
+| `G9100`–`G9104` | Factory tests built on `PROBE_ACCURACY` (not for normal use) |
+
+**A rule that holds for every command below (and corrects earlier chapters).** Looking at how the firmware reads numeric parameters: when a value is outside the allowed range (for example `SAMPLES=0` or a negative `PROBE_SPEED`), the firmware **does not stop with an error**. It writes a line `Error on '<command>': <PARAM> must have minimum of …` into its log (not on the console) and **carries on**. For decimal parameters the value used is **the limit itself** (the minimum, maximum, or the bound for "above"/"below"); for integer parameters the value you typed is used unchanged. So a wrong value silently does something else than you typed. Earlier chapters that say "error" for an out-of-range value (for example `M220 S0` in chapter 19) should be read as "logged, and the limit is used" (to verify on the printer).
+
+---
+
+## `PROBE` — Measure the bed height at the current position
+
+### What it does
+
+1. Requires **Z to be homed** (otherwise the command stops with the console message `Must home before probe`).
+2. Takes `SAMPLES` measurements in a row. Each one: lowers the nozzle at `PROBE_SPEED` until the sensor triggers, then prints `probe at X,Y is z=…` (the Z the nozzle reached). Between two measurements the nozzle lifts by `SAMPLE_RETRACT_DIST` at `LIFT_SPEED`.
+3. After each measurement the spread (highest − lowest of the samples so far) is checked against `SAMPLES_TOLERANCE`. If it is larger, the firmware writes `Probe samples exceed tolerance. Retrying …` **in its log only** (no console message) and starts the sample series again. After `SAMPLES_TOLERANCE_RETRIES` such restarts, the next failure stops the command with the console error `Probe samples exceed samples_tolerance` (the nozzle has then already been lowered several times).
+4. Computes **one** result from the samples according to `SAMPLES_RESULT` (see below), lifts the nozzle and prints `Result is z=…`.
+
+The result is also remembered as the probe's "last result" (used internally; no status field was found).
+
+### Syntax
+
+```
+PROBE [PROBE_SPEED=<mm/s>] [LIFT_SPEED=<mm/s>] [SAMPLES=<n>] [SAMPLE_RETRACT_DIST=<mm>]
+      [SAMPLES_TOLERANCE=<mm>] [SAMPLES_TOLERANCE_RETRIES=<n>] [SAMPLES_RESULT=<mode>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default (stock) |
+|---|---|---|---|
+| `PROBE_SPEED` | Lowering speed during measurement | mm/s, above 0 | 6 |
+| `LIFT_SPEED` | Speed of the lift between samples and at the end | mm/s, above 0 | 12 |
+| `SAMPLES` | Number of measurements averaged | integer ≥ 1 | 2 |
+| `SAMPLE_RETRACT_DIST` | Lift between two measurements | mm, above 0 | 2 |
+| `SAMPLES_TOLERANCE` | Largest allowed spread between samples | mm, ≥ 0 | 0.04 |
+| `SAMPLES_TOLERANCE_RETRIES` | How many times the series may be restarted | integer ≥ 0 | 20 |
+| `SAMPLES_RESULT` | How the samples are combined | `median`, `weighted`; any other word = plain average | `weighted` |
+
+**`weighted`** (an Anycubic addition): when there are **exactly two samples** (the stock `SAMPLES=2`), the result is `(2 × first sample + 3 × second sample) / 5` (weights 0.4 and 0.6), for X, Y and Z, so the second, more settled measurement counts more. With **any other number of samples** (`SAMPLES=1`, 3, 5…) `weighted` silently becomes the plain average of all samples (verified in the code). `median` is the middle sample; any other value is the average of all samples.
+
+### Examples
+
+```
+G28
+PROBE
+```
+One probing with the stock settings (2 samples, weighted result).
+
+```
+PROBE SAMPLES=5 SAMPLES_RESULT=median PROBE_SPEED=3
+```
+Five slower measurements, keep the median.
+
+### Notes and cautions
+
+- **The nozzle goes down until the sensor triggers.** Do it with a clean, cold or at most warm nozzle: hot filament on the nozzle makes the Z result wrong, and the LeviQ3 routines wipe the nozzle first for this reason (chapters 2 and 14).
+- Keep the sensor mechanism in mind: the firmware watches the strain sensor between moves; a bed with something on it, or a nozzle with a blob, gives a result that is too high.
+- `PROBE` does not change any offset or mesh by itself.
+
+---
+
+## `PROBE_ACCURACY` — Repeatability test at the current position
+
+### What it does
+
+Measures the same spot many times to see how repeatable the probe is.
+
+1. Prints a line `PROBE_ACCURACY at X:… Y:… Z:… (samples=… retract=… speed=… lift_speed=…)`.
+2. Repeats `SAMPLES` times: probe down (prints `probe at X,Y is z=…`), lift by `SAMPLE_RETRACT_DIST`.
+3. Prints one line with the **maximum, minimum, range, average, median and standard deviation** of the measured Z values.
+
+Unlike `PROBE`, the tolerance check and `SAMPLES_RESULT` are **not** used: every sample is kept.
+
+### Syntax
+
+```
+PROBE_ACCURACY [PROBE_SPEED=<mm/s>] [LIFT_SPEED=<mm/s>] [SAMPLES=<n>] [SAMPLE_RETRACT_DIST=<mm>]
+```
+
+### Parameters
+
+Same meaning as for `PROBE`. `SAMPLES` defaults to **10** here.
+
+### Examples
+
+```
+G28
+G1 X210 Y210 F6000
+PROBE_ACCURACY SAMPLES=10
+```
+A range of a few thousandths of a millimetre is normal; a range above about 0.02 mm points to a dirty nozzle, a loose sensor or a loose bed.
+
+### Notes and cautions
+
+- Needs Z homed. Do not leave the printer unattended: the nozzle touches the bed ten times.
+- The factory tests `G9100`–`G9103` below are made of `PROBE_ACCURACY` runs.
+
+---
+
+## `QUERY_PROBE` — Is the probe triggered?
+
+### What it does
+
+Reads the state of the probe sensor, up to `COUNT` times (each reading is taken after the last queued move has finished, so it is current):
+
+- a reading that is **not triggered** prints `probe: open` and the next reading follows;
+- as soon as a reading is **triggered**, it prints `probe: TRIGGERED` and the command **stops** (the remaining readings are not taken).
+
+So with nothing touching the nozzle you get `COUNT` lines `probe: open`; `COUNT=0` (or negative) prints nothing. (Words and loop verified in the code; not run on the printer.)
+
+### Syntax
+
+```
+QUERY_PROBE [COUNT=<n>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `COUNT` | Number of readings | integer | 5 |
+
+### Notes and cautions
+
+- The state of a strain sensor depends on its zero point; a "TRIGGERED" with nothing touching it means the sensor is out of range (see `QUERY_ADC`, chapter 25 / `CS1237_DUMP`, chapter 8).
+- The command is harmless: no movement.
+
+---
+
+## `PROBE_CALIBRATE` and manual probing — Set the probe `z_offset` by hand
+
+### What it does
+
+`PROBE_CALIBRATE` finds the offset between "where the sensor triggers" and "where the nozzle really touches the paper", the standard Klipper paper test:
+
+1. Refuses to start if a manual probe is already running.
+2. Runs a normal probe (`Run_probe`: same parameters as `PROBE`, so `SAMPLES`, `PROBE_SPEED`… apply) at the current position and remembers the Z.
+3. Lifts 5 mm at `LIFT_SPEED`, then moves to the probe point (the X/Y offsets are 0 here, so it stays where it is) at the probe speed.
+4. Starts the **manual probe** and prints `Starting manual Z probe. Use TESTZ to adjust position.` and `Finish with ACCEPT or ABORT command.`
+
+You then move the nozzle with `TESTZ` until a sheet of paper just drags, and finish with `ACCEPT`. The new `z_offset` is the Z found by the probe minus the Z you accepted. It is **staged** (3 decimals) in the configuration (`SAVE_CONFIG` is needed to keep it, chapter 17); the result line is written **only to the firmware log**, not to the console (the standard Klipper console message with the value and the "SAVE_CONFIG will…" text is not shown).
+
+### Manual-probe helper commands
+
+These exist **only while a manual probe is running** (they are registered when it starts and removed when it ends):
+
+| Command | Effect |
+|---|---|
+| `TESTZ Z=<value>` | Move the nozzle in Z. `Z=-1` / `Z=+0.1` = relative move (mm); `Z=--` and `Z=++` = "large" step down/up, `Z=-` and `Z=+` = half the previous step (the bisection used in Klipper); a plain number is an **absolute** Z. Prints `Z position: <lower> --> <current> <-- <upper>`. If the move is too small for the motor: `WARNING: No change in position (reached stepper resolution)`. |
+| `ACCEPT` (alias `NEXT`) | Take the current Z as the result and finish. Fails with `Manual probe failed! Use TESTZ commands to position the nozzle prior to running ACCEPT.` (and ends the probe) if X/Y changed or the nozzle is not lower than where the probe started. |
+| `ABORT` | End the manual probe without result. |
+
+### Syntax
+
+```
+PROBE_CALIBRATE [SPEED=<mm/s>] [PROBE_SPEED=…] [LIFT_SPEED=…] [SAMPLES=…] [SAMPLE_RETRACT_DIST=…]
+                [SAMPLES_TOLERANCE=…] [SAMPLES_TOLERANCE_RETRIES=…] [SAMPLES_RESULT=…]
+TESTZ Z=<value>
+ACCEPT
+NEXT
+ABORT
+```
+
+### Parameters
+
+`PROBE_CALIBRATE`: all the `PROBE` parameters; plus `SPEED` (default 5 mm/s) = speed of the manual moves (a standard Klipper manual-probe parameter, read when the manual probe starts).
+
+### Examples
+
+```
+G28
+PROBE_CALIBRATE
+TESTZ Z=-1
+TESTZ Z=-0.1
+ACCEPT
+SAVE_CONFIG
+```
+
+### Notes and cautions
+
+- On this printer the standard procedure is replaced in normal use by `LEVIQ_AUTO_ZOFFSET` (chapter 14), which does the same job with the strain sensor and no paper. Use `PROBE_CALIBRATE` only if you want to calibrate by hand.
+- The bed must be at the temperature you print at, and the nozzle clean. `SAVE_CONFIG` does not restart the firmware (chapter 17): the new value is read from the file, but the status of the configuration shown by Moonraker may still show the old one.
+- Manual probing is also reachable from `BED_MESH_CALIBRATE METHOD=manual`, and from the touchscreen routines.
+
+---
+
+## `Z_OFFSET_APPLY_PROBE` — Make the current Z offset permanent
+
+### What it does
+
+1. Reads the current **G-code Z offset** (the "babystepping" set with `SET_GCODE_OFFSET Z=` / `Z_ADJUST=`, chapter 19).
+2. If it is 0: writes `Nothing to do: Z Offset is 0` and stops.
+3. Otherwise computes **new `z_offset` = current probe `z_offset` − offset** (rounded to 4 decimals), and **stages** it in the configuration (`SAVE_CONFIG` writes it, chapter 17). The usual Klipper console message (value and "SAVE_CONFIG will…") is **not** shown; the value goes to the log.
+4. Sends two internal events (`leviq2:save_calibration`, `leviq:sync_zoffset`) so that the touchscreen and the LeviQ3 module update their copy of the Z offset.
+
+### Syntax
+
+```
+Z_OFFSET_APPLY_PROBE
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+SET_GCODE_OFFSET Z_ADJUST=0.05 MOVE=1
+Z_OFFSET_APPLY_PROBE
+SAVE_CONFIG
+```
+You adjusted the first layer by 0.05 mm while printing; this stores the correction permanently.
+
+### Notes and cautions
+
+- Nothing is written to the file until `SAVE_CONFIG`.
+- Besides the G-code command, the touchscreen reaches the same function through the web interface commands `move/z_offset_apply` and `move/z_offset_apply_absolute` (the second takes an absolute offset). The touchscreen also uses an internal "move Z" request that moves the nozzle, waits 2 s and logs the strain-sensor reading.
+- `LEVIQ_AUTO_ZOFFSET` calls this routine itself (chapter 14).
+
+---
+
+## `G9100`–`G9104` — Factory probe tests
+
+Five commands used by Anycubic's production tests. They are **not for normal use**: they move the head, heat, run many probings and (G9104) rewrite calibration values. All parameters are integers and default to **0**, so they must be given explicitly. They were read from the code only and never tried; the parameter roles and the fixed temperatures/positions above were checked in the disassembly, the measurement steps of `G9104` only at call-summary level (to verify).
+
+| Command | What it does |
+|---|---|
+| `G9100 S<samples> X<x> Y<y> F<speed>` | Homes `G28` if X/Y/Z are not all homed, waits 3 s, moves to (X,Y) at feed rate F (mm/min), then runs `PROBE_ACCURACY SAMPLES=S`. Test of the Z-axis zeroing repeatability at one point. |
+| `G9101 S<rounds> C<samples>` | `G90`, then `S` times: `G9111` (heating and wiping preparation with its default values, chapter 2) followed by `PROBE_ACCURACY SAMPLES=C`; at the end `TURN_OFF_HEATERS` and `M107`. Test of the wiping (a dirty nozzle gives a worse accuracy). |
+| `G9102 S<rounds> C<samples> F<speed>` | Homes if needed (`G28`, when X/Y/Z are not all homed), `G90`, waits 3 s, then repeats `S` times: for each of five bed points — (15,15), (240,15), (125,125), (15,240), (240,240) — move there at F mm/min, wait 1 s, `PROBE_ACCURACY SAMPLES=C`, lift Z by 10 mm (`G91 G1 Z10 F300`). Test of the bed shake / bed stability. |
+| `G9103 S<rounds> C<samples> F<speed>` | Fixed preparation: `HOME_XY`, bed 60 °C and nozzle 170 °C (`M140 S60`, `M109 S170`), `G9112` (wiping), then bed 60 °C and nozzle 140 °C, `M107`, `G28`, `G90`, wait 3 s. Then, `S` times: `M204 S10000`, `G1 F<F>`, move (with a short wait) to the first three positions of `bed_mesh_error_pos` in `printer.cfg` — (10,10), (410,10), (205,205) — running `PROBE_ACCURACY SAMPLES=C` at them, logging `point_diff_<n> val1:… val2:… diff:…` (the difference between two measured points) in the firmware log, and lifting Z by 10 mm. Finishes with `G1 X0 Y0 F6000`, `TURN_OFF_HEATERS`, `M204 S20000`, `M84`. Test of the bed-mesh height error. |
+| `G9104 [R]` | Calibration of the Z gap with the strain sensor, for **one side per run**: with the parameter `R` (any value) the **right** side (`G28 R`, position `calibration_right_position` of `[probe]`), without it the **left** side (`G28 L`, `calibration_left_position`). Steps: `G90`, `BED_MESH_CLEAR`, `G9121 E1 R1 T0.1` (strain sensor mode, chapter 8), `G28 R` / `G28 L` (chapter 12), wait 2 s, read the zero ADC value, then Z moves in steps while the ADC readings are logged; the two measured gaps are stored as `z_gap_right_up` / `z_gap_right_down` (R) or `z_gap_left_up` / `z_gap_left_down` (no R) in the configuration and saved (`save_config`); ends with `M84` and `G9121 E0 R0`. Changes saved calibration values: do **not** run it. |
+
+### Notes and cautions
+
+- These are the commands behind the factory "test" screens; running one by accident (even `G9100` with all defaults, which moves to X0 Y0 at F0) is possible but pointless.
+- `G9101`–`G9103` heat, wipe and probe for many minutes unattended; `G9104` writes the probe-gap calibration.
+
+---
+
+*End of chapter 24.*
