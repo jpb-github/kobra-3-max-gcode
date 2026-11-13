@@ -1,0 +1,9 @@
+# Track only the Markdown documents; ignore everything else
+# (firmware files, analysis scripts/data, the cloned Klipper-go source).
+*
+!.gitignore
+!*.md
+!*/
+Klipper-go/
+K3M_2.5.2.8/
+analysis/
