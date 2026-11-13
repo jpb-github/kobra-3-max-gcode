@@ -2555,7 +2555,7 @@ Measure noise for 5 s on an idle, undisturbed printer.
 4. Prints `Testing axis <axis>`, then **vibrates** the head (X) or bed (Y) along that axis while recording:
    - The frequency is swept from `FREQ_START` to `FREQ_END` at `HZ_PER_SEC` Hz per second, with a shaking acceleration proportional to the frequency (`ACCEL_PER_HZ` × frequency). Stock: 10 → 100 Hz at 4 Hz/s ≈ **22 s** per axis.
    - On top of the vibration the head also moves slowly back and forth along the axis (**sweeping**, acceleration `SWEEPING_ACCEL`, period `SWEEPING_PERIOD`), so the measurement is not taken at a single spot. `SWEEPING_PERIOD=0` switches it off (pure vibration at the test point).
-   - During the test the acceleration limit of the toolhead is temporarily raised to the strongest test acceleration (and the "minimum cruise ratio" set to 0), and **input shaping is switched off** unless you pass `INPUT_SHAPING=1`. Everything is restored afterwards.
+   - During the test the acceleration limit of the toolhead is temporarily set to the strongest test acceleration (and the "minimum cruise ratio" is requested as 0), and **input shaping is switched off** unless you pass `INPUT_SHAPING=1`. Everything is restored afterwards. **Two limits of this firmware apply (see `SET_VELOCITY_LIMIT`, chapter 28):** the acceleration can never exceed the configuration value (10 000 mm/s² in stock), so a test acceleration above that is cut to it, and a cruise ratio of `0` is ignored by the command, so the ratio stays as it was. Also, that `SET_VELOCITY_LIMIT` call names only the acceleration (and ratio), so every other speed/acceleration limit is reset to its configuration value during the test (to verify; not tested on a printer).
 5. Analyses the recording (frequency spectrum) and writes the results to files in `/tmp/` (see `OUTPUT`). The "data written" messages go to the firmware log only, not to the console.
 
 ### Syntax
@@ -2610,7 +2610,7 @@ Test X at another place over a narrower band (shorter test).
 
 ### Notes and cautions
 
-- **Loud and violent.** At stock settings the shaking acceleration reaches roughly `accel_per_hz × max frequency` = 150 × 100 = 15 000 mm/s² at the top of the sweep (the firmware's test generator uses Klipper's formula) — above the 10 000 mm/s² printing limit. Reduce `ACCEL_PER_HZ` if it sounds or feels alarming.
+- **Loud and violent.** At stock settings the shaking acceleration reaches roughly `accel_per_hz × max frequency` = 150 × 100 = 15 000 mm/s² at the top of the sweep (the firmware's test generator uses Klipper's formula) — above the 10 000 mm/s² printing limit (the toolhead's acceleration limit is capped at 10 000 during the test, chapter 28, so the real peak may be lower than the formula says; to verify). Reduce `ACCEL_PER_HZ` if it sounds or feels alarming.
 - The command does **not** change your input shaper; it only produces data. To get a recommendation use `SHAPER_CALIBRATE`.
 - The test point is Z = 20 above the bed: remove anything tall from the bed; the nozzle should be cold or at least not touching anything.
 - Must be homed first (use `G28`).
@@ -6169,3 +6169,505 @@ The touchscreen reads the state of the function with the web request `timelapse/
 ---
 
 *End of chapter 27.*
+
+
+---
+
+# Chapter 28 — Toolhead and motion limits: `G4`, `M400`, `SET_VELOCITY_LIMIT`, `RESET_VELOCITY_LIMIT`, `SAVE_VELOCITY`, `M201`, `M203`, `M204`, `M205`
+
+This last chapter covers the commands that **wait** (`G4`, `M400`) and the commands that set the printer's **speed and acceleration limits** (`SET_VELOCITY_LIMIT`, `RESET_VELOCITY_LIMIT`, `SAVE_VELOCITY`, `M201`, `M203`, `M204`, `M205`). Slicers write the `M20x` lines at the start of a print and `M204` before many features (outer wall, infill, first layer…), so they are in almost every G-code file.
+
+This firmware does **not** behave like standard Klipper or Marlin for these commands. Read the three rules below before using them.
+
+| Command | What it does |
+|---|---|
+| `G4 [P<ms>] [S<s>]` | Pause the motion queue for a time |
+| `M400` | Wait until all queued moves have really finished |
+| `SET_VELOCITY_LIMIT …` | Change several limits (speed, acceleration, corner speed…) |
+| `RESET_VELOCITY_LIMIT` | Put every limit back to the configuration-file value |
+| `SAVE_VELOCITY [NAME=…]` | Stage the current limit(s) for `SAVE_CONFIG` |
+| `M201 X Z E` | Maximum-acceleration "limit" values (X → `max_accel_limit`, Z, E) |
+| `M203 X Z E` | Maximum speeds (X → `max_velocity`, Z, E) |
+| `M204 S` / `M204 P T` | Print/travel acceleration (`max_accel`) |
+| `M205 X E` | Corner ("jerk") speeds |
+
+## The limits and their names
+
+The printer keeps these values. The same value has a Klipper-style name (`SET_VELOCITY_LIMIT`) and sometimes a Marlin-style one (`M20x`). **Stock value** = the stock `printer.cfg` `[printer]` section; the live printer used for the checks in this chapter reports the same numbers.
+
+| Limit (name in status) | `SET_VELOCITY_LIMIT` parameter | M-code | Stock value | What it limits |
+|---|---|---|---|---|
+| `max_velocity` | `VELOCITY` | `M203 X` | 600 mm/s | Top speed of any move |
+| `max_z_velocity` | `Z_VELOCITY` | `M203 Z` | 20 mm/s | Top speed of the Z axis |
+| `max_e_velocity` | `E_VELOCITY` | `M203 E` | 600 mm/s | Top speed of the extruder |
+| `max_accel` | `ACCEL` | `M204` | 10 000 mm/s² | Acceleration of X/Y moves |
+| `max_accel_limit` | `ACCEL_LIMIT` | `M201 X` | 10 000 mm/s² | Second X/Y acceleration value (see notes) |
+| `max_z_accel` | `Z_ACCEL` | — | 3 000 mm/s² | Acceleration of the Z axis |
+| `max_z_accel_limit` | `Z_ACCEL_LIMIT` | `M201 Z` | 3 000 mm/s² | Second Z acceleration value |
+| `max_e_accel` | `E_ACCEL` | — | 10 000 mm/s² | Acceleration of the extruder |
+| `max_e_accel_limit` | `E_ACCEL_LIMIT` | `M201 E` | 10 000 mm/s² | Second extruder acceleration value |
+| `square_corner_velocity` | `SQUARE_CORNER_VELOCITY` | `M205 X` | 20 mm/s | Speed through a 90° corner (X/Y) |
+| `instantaneous_corner_velocity` | `SQUARE_CORNER_VELOCITY_E` | `M205 E` | **1 mm/s** (see below) | Corner speed for extruder-driven changes |
+| `minimum_cruise_ratio` | `MINIMUM_CRUISE_RATIO` | — | see below | Share of a move kept at cruise speed |
+| `max_accel_to_decel` | `ACCEL_TO_DECEL` | — | 10 000 mm/s² | Acceleration used to slow down |
+
+All of these appear in the `toolhead` object of the printer status (for example through the web request `/printer/objects/query?toolhead`), so you can always check which value is really active.
+
+### Rule 1 — the configuration file is a ceiling
+
+When the printer starts it remembers the values of the `[printer]` section as the **original configuration values**. A command can **lower** a limit, never raise it: any value above the original is silently replaced by the original. Example with the stock values: `M204 S15000` ends up as 10 000; `SET_VELOCITY_LIMIT VELOCITY=800` ends up as 600; `M203 Z30` ends up as 20.
+
+### Rule 2 — a limit you do not mention goes back to the configuration value
+
+In standard Klipper a parameter you leave out keeps its current value. **Here it does not.** In `SET_VELOCITY_LIMIT`, `M201`, `M203` and `M205`, **every limit of the command that is not given (or is given as 0, a negative number or text) is reset to its original configuration value**. Some consequences:
+
+- `M203 X300` sets the speed limit to 300 **and resets the Z and E speed limits** to 20 and 600.
+- `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=9` sets the corner speed to 9 **and resets the acceleration, speeds and everything else to the configuration values** — including an acceleration set a moment earlier by `M204`.
+- `SET_VELOCITY_LIMIT` with no parameter at all is therefore a (nearly complete) reset, not a status request.
+
+(`M204` is the exception: it has a single limit, and a line without `S`, `P` or `T` changes nothing.)
+
+### Rule 3 — silence
+
+None of these commands prints anything on the console, even when a value was ignored or replaced. A wrong number is only written to the printer's log. Check what is really active in the `toolhead` status (see above).
+
+### The `_E` corner speed is 1 mm/s, not 20
+
+The stock `printer.cfg` has a line `square_corner_velocity_e: 20`. **The firmware does not read that key.** The value behind `M205 E` and `SQUARE_CORNER_VELOCITY_E` is the Klipper setting `instantaneous_corner_velocity`, which defaults to **1** when absent. The live printer confirms it (`instantaneous_corner_velocity: 1`). Because of rule 1 this value can never be raised above 1 by a command; the usual slicer line `M205 X20.00 Y20.00 Z20.00 E20.00` therefore changes the X/Y corner speed (to 20) and leaves the other at 1.
+
+## How the limits are used (what was found)
+
+- **Normal X/Y moves**: speed ≤ `max_velocity`, acceleration = `max_accel`.
+- **Moves with a Z part**: the Z axis may not exceed `max_z_velocity` and **the smaller of** `max_z_accel` and `max_z_accel_limit`, scaled by the share of the move that is vertical.
+- **Extruder**: `max_e_velocity` and the E acceleration values limit extrusion (traced less closely; to verify).
+- **Corners**: the speed through a corner is derived from `square_corner_velocity` and `max_accel` (Klipper's "junction deviation": `0.414 × square_corner_velocity² ÷ max_accel`). A **lower** acceleration therefore raises the speed allowed in corners, a higher one lowers it (the allowance is recomputed whenever `max_accel` changes).
+- **Slowing down**: the deceleration allowance (`max_accel_to_decel`) is always recomputed as `(1 − minimum_cruise_ratio) × max_accel`, so changing `M204` also changes it.
+- **`*_limit` values for X/Y**: `max_accel_limit` (`M201 X`) is stored and reported in the status, but the move planner was only found to use `max_accel` for X/Y moves (to verify). The Z limit value is used (see above).
+
+### Two extra limits that apply on top (not G-code commands)
+
+The `[printer]` section also contains two features that Anycubic added and that silently change speeds, whatever the G-code says. They only ever **reduce** a speed or acceleration; they are read from the configuration, not changed by the commands of this chapter.
+
+**1. Acceleration and speed by height** — `kin_param_limit_hight` (stock: `1_600_10000,250_600_2000,350_600_1000`). Each group is `height_speed_acceleration` (mm, mm/s, mm/s²). For every move the firmware looks at the **Z height of the head** (start or end point of the move; which one was not determined) and limits the move's speed and acceleration by linear interpolation between the groups:
+
+| Height of the head | Max speed | Max acceleration |
+|---|---|---|
+| up to 1 mm | 600 mm/s | 10 000 mm/s² |
+| 125 mm (interpolated) | 600 mm/s | ≈ 6 000 mm/s² |
+| 250 mm | 600 mm/s | 2 000 mm/s² |
+| 300 mm (interpolated) | 600 mm/s | 1 500 mm/s² |
+| 350 mm and above | 600 mm/s | 1 000 mm/s² |
+
+So on tall prints the acceleration really used is low even if the G-code says `M204 S10000`; `M204` can only lower it further. (Read from the code and the configuration; not measured on a printer.)
+
+**2. Forbidden speed bands on the Y axis** — `velocity_range_limit` (stock: `45_70,75_90,110_135`, in mm/s). For every move the firmware computes the speed the **Y axis** would have at the move's top speed (top speed × the Y share of the move). If that Y speed is **inside** a band (for example 50 mm/s is inside 45–70), the move's top speed is changed to the **nearer edge of the band**: the upper edge (only if the resulting speed does not exceed `max_velocity`), otherwise the lower edge. The purpose is evidently to avoid bed resonances. Consequence: some slicer speeds (for example a 60 mm/s diagonal or Y-direction move) are not what the G-code asks for. A setting `velocity_range_limit_begin_min` (live printer: 20) and a log switch `velocity_range_limit_hit_log` also exist; how `begin_min` is applied was not analysed. A third key, `accel_height_limit` (`250_4000,300_3000,…`), is read at start-up, but no code using it was found (to verify).
+
+---
+
+## `G4` — Pause
+
+### What it does
+
+1. Reads the delay: `P` in **milliseconds**; if `P` gives 0 (missing, 0 or negative) it reads `S` in **seconds**.
+2. Lets the printer finish **planning** every move already received (the planner must now plan the last move so that it ends at standstill), then adds a pause of that length to the move queue. The next move starts only after the pause.
+
+Heaters, fans and the rest keep running normally during a pause. If both `P` and `S` are given, `P` is used.
+
+### Syntax
+
+```
+G4 [P<milliseconds>] [S<seconds>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `P` | Pause in milliseconds | 0 or more (a negative value is logged and read as 0) | 0 |
+| `S` | Pause in seconds, used only when `P` gives 0 | 0 or more | 0 |
+
+### Examples
+
+```
+G4 P500
+```
+Pause 0.5 s.
+
+```
+G4 S2
+```
+Pause 2 s.
+
+```
+G4 S0
+```
+No pause, but the planner must finish the moves before it (see below). This line appears 751 times in the sample G-code files of the printer.
+
+### Notes and cautions
+
+- `G4` pauses the **motion queue**, not necessarily the real clock at the moment the line is read: moves received earlier may still be running. To be sure every move has physically ended, use `M400`.
+- `G4 S0` / `G4 P0` is not a no-op: it forces a planning boundary, so the moves before it are decelerated to a stop at their end (standard Klipper behaviour; it was not tested on this firmware).
+- A text instead of a number is read as 0.
+
+---
+
+## `M400` — Wait for the moves to finish
+
+### What it does
+
+Completes the planning of all queued moves, then **waits** (checking every 0.1 s) until the printer has actually executed them. Nothing is printed. Use it before something that must happen after the head has stopped: a camera picture, a door check, a macro that reads a position.
+
+### Syntax
+
+```
+M400
+```
+
+No parameters.
+
+### Examples
+
+```
+G1 X100 Y100 F6000
+M400
+SNAPSHOT V=1
+```
+Move, wait until the head has arrived, then take a picture (the timelapse code uses exactly this idea).
+
+### Notes and cautions
+
+- Unlike `G4 S0`, `M400` really holds the G-code reading until the moves are done. It does not wait for temperatures (use `M109`/`M190`/`TEMPERATURE_WAIT`).
+- It does not check that the moves succeeded.
+
+---
+
+## `SET_VELOCITY_LIMIT` — Change the limits
+
+### What it does
+
+1. Reads the 13 parameters below. A value that is missing, 0, negative or not a number counts as "not given".
+2. If `ACCEL_TO_DECEL` is given, it is stored as the requested deceleration allowance.
+3. If `MINIMUM_CRUISE_RATIO` is not given but `ACCEL_TO_DECEL` is, the cruise ratio is **computed**: `1 − min(1, ACCEL_TO_DECEL ÷ acceleration)`, where the acceleration is `ACCEL` if given, otherwise the current `max_accel`. A computed ratio of exactly 0 is not stored (the old ratio stays).
+4. Every speed, acceleration and corner-speed limit is set to the value given **if it is above 0 and not above the original configuration value**; **otherwise to the original configuration value** (rule 2).
+5. If a cruise ratio was given or computed (and is not 0) it is stored.
+6. The corner allowance and the deceleration allowance are recomputed (the latter as `(1 − ratio) × max_accel`).
+
+Nothing is printed; the new values are visible in the `toolhead` status.
+
+### Syntax
+
+```
+SET_VELOCITY_LIMIT [VELOCITY=<mm/s>] [Z_VELOCITY=<mm/s>] [E_VELOCITY=<mm/s>]
+                   [ACCEL=<mm/s²>] [ACCEL_LIMIT=<mm/s²>]
+                   [Z_ACCEL=<mm/s²>] [Z_ACCEL_LIMIT=<mm/s²>]
+                   [E_ACCEL=<mm/s²>] [E_ACCEL_LIMIT=<mm/s²>]
+                   [SQUARE_CORNER_VELOCITY=<mm/s>] [SQUARE_CORNER_VELOCITY_E=<mm/s>]
+                   [MINIMUM_CRUISE_RATIO=<0–1>] [ACCEL_TO_DECEL=<mm/s²>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | If not given |
+|---|---|---|---|
+| `VELOCITY` | Top speed | above 0, up to the config value (600) | back to config value |
+| `Z_VELOCITY` | Z top speed | up to 20 | back to config value |
+| `E_VELOCITY` | Extruder top speed | up to 600 | back to config value |
+| `ACCEL` | Acceleration | up to 10 000 | back to config value |
+| `ACCEL_LIMIT` | Second X/Y acceleration value | up to 10 000 | back to config value |
+| `Z_ACCEL` | Z acceleration | up to 3 000 | back to config value |
+| `Z_ACCEL_LIMIT` | Second Z acceleration value | up to 3 000 | back to config value |
+| `E_ACCEL` | Extruder acceleration | up to 10 000 | back to config value |
+| `E_ACCEL_LIMIT` | Second extruder acceleration value | up to 10 000 | back to config value |
+| `SQUARE_CORNER_VELOCITY` | Corner speed (X/Y) | 0 or more, up to 20 | back to config value |
+| `SQUARE_CORNER_VELOCITY_E` | Extruder corner speed | up to **1** (see above) | back to config value |
+| `MINIMUM_CRUISE_RATIO` | Minimum share of cruise speed | above 0 and below 1 (1 or more is logged and read as 1.0, which would leave **no** slowing allowance: avoid); **0 is ignored** | unchanged (or computed from `ACCEL_TO_DECEL`) |
+| `ACCEL_TO_DECEL` | Deceleration allowance, converted to a cruise ratio as in step 3 | above 0 (not capped) | unchanged |
+
+Only these exact parameter names are read; anything else is ignored.
+
+### Examples
+
+```
+SET_VELOCITY_LIMIT ACCEL=3000 VELOCITY=200
+```
+Acceleration 3000 mm/s² and top speed 200 mm/s. Every other limit is **reset** to its configuration value.
+
+```
+SET_VELOCITY_LIMIT VELOCITY=300 Z_VELOCITY=10 E_VELOCITY=100 ACCEL=5000 Z_ACCEL=1000 E_ACCEL=2000 SQUARE_CORNER_VELOCITY=10
+```
+To change several limits and keep the others lower than the ceiling, give them all in one command.
+
+```
+SET_VELOCITY_LIMIT
+```
+Resets every limit (but not the cruise ratio) to the configuration values. It does not display anything.
+
+### Notes and cautions
+
+- **Order matters.** A `M204 S500` followed by `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=9` ends with an acceleration of **10 000**, not 500. This exact two-line pair is present in the sample G-code files of the printer (first-layer start, e.g. `ACE 2 Pro Lock Helper_PLA_0.2_7m31s.gcode`, line 179–180). If that reading is right, the first layer's low acceleration is cancelled by the next line. **Not tested on a printer** — see "To verify" for a harmless check.
+- The resonance test (chapter 13) calls `SET_VELOCITY_LIMIT ACCEL=… MINIMUM_CRUISE_RATIO=0` and restores the values afterwards; with this firmware the ratio `0` is ignored and the acceleration cannot exceed the configuration value.
+- `MINIMUM_CRUISE_RATIO` and `ACCEL_TO_DECEL` are only meaningful together with a coherent `ACCEL`; with the stock values (`max_accel_to_decel` = `max_accel` = 10 000) the ratio is 0 — but see the observation in "To verify".
+- The result is **not saved**. It lasts until a restart, `RESET_VELOCITY_LIMIT` or the end of a print that resets it (`CANCEL_PRINT` and `G9113` do).
+
+---
+
+## `RESET_VELOCITY_LIMIT` — Back to the configuration values
+
+### What it does
+
+Sets all speeds, accelerations, `ACCEL_TO_DECEL` and both corner speeds back to the original configuration values (the ceilings), then recomputes the corner and deceleration allowances. A line is written in the log only; nothing on the console.
+
+**The `minimum_cruise_ratio` is not reset** by this command (it keeps its current value).
+
+### Syntax
+
+```
+RESET_VELOCITY_LIMIT
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+RESET_VELOCITY_LIMIT
+```
+Use it at the end of a macro that lowered the limits (calibration, a slow first layer…).
+
+### Notes and cautions
+
+- Called by the printer itself in the print-cancel sequence (chapter 21) and in `G9113` (chapter 2).
+- It cancels the effect of `M201`, `M203`, `M204`, `M205` and `SET_VELOCITY_LIMIT` — but not of the height and Y-band limits described above.
+
+---
+
+## `SAVE_VELOCITY` — Stage the current limit(s) for the configuration file
+
+### What it does
+
+Takes the **current** value of the limit named by `NAME` and stores it in the `[printer]` section of the staged configuration (formatted with two decimals), under the Klipper key name (`max_velocity`, `max_accel`, …). Nothing is written to disk yet: like other staged settings (chapter 17) it only becomes permanent after **`SAVE_CONFIG`**, and it is read at the next start.
+
+Because the current values can never be above the ceiling, `SAVE_VELOCITY` can only **keep or lower** the defaults of the printer; after a restart the saved value becomes the new original value (the new ceiling). Raising it again would need an edit of the configuration (inferred).
+
+If `NAME` is not one of the names below (or is empty), nothing is saved and the current values of the 12 limits are **printed** in one line instead (`max_velocity: …, max_z_velocity: …, … square_corner_velocity: …, instantaneous_corner_velocity: …`).
+
+### Syntax
+
+```
+SAVE_VELOCITY [NAME=<name>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `NAME` | Which limit to stage (not case-sensitive) | `VELOCITY`, `Z_VELOCITY`, `E_VELOCITY`, `ACCEL`, `ACCEL_LIMIT`, `Z_ACCEL`, `Z_ACCEL_LIMIT`, `E_ACCEL`, `E_ACCEL_LIMIT`, `SQUARE_CORNER_VELOCITY`, `SQUARE_CORNER_VELOCITY_E` (saved as `instantaneous_corner_velocity`), `ACCEL_TO_DECEL`, or `ALL` (all 12) | `VELOCITY` |
+
+`MINIMUM_CRUISE_RATIO` has no name here and is never saved.
+
+### Examples
+
+```
+SAVE_VELOCITY NAME=ACCEL
+SAVE_CONFIG
+```
+Make the present acceleration the new default.
+
+```
+SAVE_VELOCITY NAME=?
+```
+Show the current limits on the console (any unknown name does this).
+
+### Notes and cautions
+
+- A bare `SAVE_VELOCITY` saves only `max_velocity`, not everything.
+- `ACCEL_TO_DECEL` saves the *requested* deceleration value, not the value derived from the cruise ratio.
+- As for any staged value, whether `SAVE_CONFIG` really applies it without a restart was not confirmed on this printer (chapter 17 and the notes on `SAVE_CONFIG`).
+
+---
+
+## `M201` — Maximum acceleration "limit" values
+
+### What it does
+
+Sets the three `*_accel_limit` values from the parameters `X` (→ `max_accel_limit`), `Z` (→ `max_z_accel_limit`) and `E` (→ `max_e_accel_limit`), by the rules above (≤ configuration value; a missing or non-positive one is reset). Recomputes the corner and deceleration allowances. Prints nothing.
+
+`Y` is read by nobody: only `X` stands for the X/Y pair.
+
+### Syntax
+
+```
+M201 [X<mm/s²>] [Z<mm/s²>] [E<mm/s²>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | If not given |
+|---|---|---|---|
+| `X` | `max_accel_limit` (X/Y) | above 0, up to 10 000 | back to config value |
+| `Z` | `max_z_accel_limit` | up to 3 000 | back to config value |
+| `E` | `max_e_accel_limit` | up to 10 000 | back to config value |
+
+### Examples
+
+```
+M201 X10000 Y10000 Z3000 E10000
+```
+The line written by the slicer (it appears in the printer's sample files). `Y` is ignored; the values equal the ceilings, so nothing changes.
+
+```
+M201 X10000 Y10000 Z1500 E5000
+```
+The Z limit becomes 1 500 (and `Z` moves are then limited by it), the extruder limit 5 000.
+
+### Notes and cautions
+
+- This is **not** the Marlin "maximum acceleration" of the machine; `M204` sets `max_accel`.
+- The effective limit on Z is the smaller of `max_z_accel` and `max_z_accel_limit`.
+
+---
+
+## `M203` — Maximum speeds
+
+### What it does
+
+Sets `max_velocity` (`X`), `max_z_velocity` (`Z`) and `max_e_velocity` (`E`) by the same rules (≤ configuration value; missing or non-positive → reset). Prints nothing. `Y` is ignored.
+
+### Syntax
+
+```
+M203 [X<mm/s>] [Z<mm/s>] [E<mm/s>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | If not given |
+|---|---|---|---|
+| `X` | `max_velocity` — top speed of X/Y moves | above 0, up to 600 | back to 600 |
+| `Z` | `max_z_velocity` | up to 20 | back to 20 |
+| `E` | `max_e_velocity` | up to 600 | back to 600 |
+
+### Examples
+
+```
+M203 X600 Y600 Z20 E600
+```
+The usual slicer line; changes nothing in stock configuration.
+
+```
+M203 X600 Y600 Z15 E80
+```
+Z speed limited to 15 mm/s and **the extruder limited to 80 mm/s** (present in some of the sample files): quick filament moves (retractions, purges) are slower.
+
+### Notes and cautions
+
+- Because of rule 2, a line like `M203 X300` also resets Z and E.
+- The speed bands of the Y axis (see above) still apply on top.
+
+---
+
+## `M204` — Acceleration
+
+### What it does
+
+1. If `S` is given, uses it as the acceleration. Otherwise it reads `P` (print) and `T` (travel): if both are given, **the smaller** is used; if only one, that one. (`R`, the Marlin retract acceleration, is ignored.)
+2. If neither `S`, `P` nor `T` is given, writes `Invalid M204 command: <the line>` **in the log** (not on the console) and changes nothing.
+3. The value is set as `max_accel` **if it is above 0 and not above the configuration value; otherwise `max_accel` goes back to the configuration value** (so `M204 S0` or `M204 S-1` resets it, and `M204 S20000` gives 10 000).
+4. If `max_accel` really changed, the corner and deceleration allowances are recomputed.
+
+Nothing is printed. The other limits are not touched.
+
+### Syntax
+
+```
+M204 S<mm/s²>
+M204 [P<mm/s²>] [T<mm/s²>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `S` | Acceleration (used first if present) | above 0 (up to 10 000; above it is reduced to 10 000; 0 or negative resets to 10 000) | none |
+| `P` | Print acceleration, used when `S` is absent | above 0 (a value of 0 or less is logged and read as 0, which resets to 10 000) | none |
+| `T` | Travel acceleration, used when `S` is absent | same as `P` | none |
+
+### Examples
+
+```
+M204 S5000
+```
+Acceleration 5 000 mm/s² for all following moves.
+
+```
+M204 P2000 T10000
+```
+Because the **smaller** of `P` and `T` is used, this gives 2 000 for everything, including travel moves — unlike Marlin.
+
+```
+M204 S500
+```
+Slow acceleration, used by the slicers for the first layer.
+
+### Notes and cautions
+
+- The most frequent values in the sample files are `S10000`, `S5000`, `T10000`, `S1000`, `P5000`, `P2000`, `P500`.
+- `M204` is overridden by a following `SET_VELOCITY_LIMIT` that does not give `ACCEL` (see that command), and acceleration is further limited at height (see above).
+- `M204 R…` alone is "invalid" (only logged).
+
+---
+
+## `M205` — Corner speeds ("jerk")
+
+### What it does
+
+Sets `square_corner_velocity` from `X` and the extruder/instantaneous corner velocity from `E`, by the same rules (≤ configuration value; missing or non-positive → reset). Then recomputes the corner and deceleration allowances. Prints nothing. `Y`, `Z` and every other letter (`J`, `S`, `T`…) are ignored.
+
+### Syntax
+
+```
+M205 [X<mm/s>] [E<mm/s>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | If not given |
+|---|---|---|---|
+| `X` | `square_corner_velocity` (speed through a 90° corner) | above 0, up to 20 | back to 20 |
+| `E` | `instantaneous_corner_velocity` | above 0, up to **1** | back to 1 |
+
+### Examples
+
+```
+M205 X9.00 Y9.00 Z3.00 E3.00
+```
+Lower corner speed 9 (a line found in the sample files); `E3.00` is reduced to 1 (the ceiling), `Y`/`Z` are ignored.
+
+```
+M205 X20.00 Y20.00 Z20.00 E20.00
+```
+Stock values; the net result is X = 20 and E = 1.
+
+### Notes and cautions
+
+- The corner speed is *not* a Marlin "jerk" in the strict sense: it feeds Klipper's junction-deviation formula. A lower value gives lower speed in corners and a neater print at the cost of time.
+- Some slicers write these lines at the print start, and some set `SQUARE_CORNER_VELOCITY` by `SET_VELOCITY_LIMIT` instead — see the order warning there.
+
+---
+
+### To verify (not tested on a printer)
+
+All results come from reading the firmware, plus read-only queries of the live printer's status and configuration. Nothing was sent to the printer.
+
+- **Rule 2 in practice.** The firmware reading says that `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=9` resets the acceleration. A harmless test on an idle printer: read the `toolhead` status; send `M204 S3000`; read it again (`max_accel` 3000?); send `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=9`; read again (`max_accel` back to 10000? `square_corner_velocity` 9?). Finish with `RESET_VELOCITY_LIMIT`. It would also confirm that the first-layer `M204 S500` of many profiles is cancelled in this firmware.
+- **`minimum_cruise_ratio` on the live printer.** The toolhead status shows `minimum_cruise_ratio: 0.5` while the live configuration says `0.05` (and stock `printer.cfg` would give 0). Something changed it after start-up (an `ACCEL_TO_DECEL` command from a calibration or a print?) or the status shows another value than the setting; the cause was not found. A `RESET_VELOCITY_LIMIT` does **not** change it; only a restart would.
+- **Whether `max_accel_limit` / `M201 X` has any effect on X/Y moves.** Only the report in the status and the Z/extruder limits were found in use.
+- **The extruder limits** (how `max_e_accel`/`max_e_accel_limit` are applied in detail), **the `begin_min` setting of the Y bands**, and **`accel_height_limit`** (no user found).
+- That `SAVE_VELOCITY` + `SAVE_CONFIG` takes effect after a restart, and what a printer with already-staged values does at start (chapter 17 covers the open questions about `SAVE_CONFIG`).
+- That the unknown-`NAME` message of `SAVE_VELOCITY` appears on the console (it is sent through the command's answer function, with the "log" option off).
+
+---
+
+*End of chapter 28 — the last chapter of this guide.*
