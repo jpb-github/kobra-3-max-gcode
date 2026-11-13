@@ -790,7 +790,7 @@ Nine basic commands: talking to the console, asking the printer about itself, re
 
 | Command | In one line |
 |---|---|
-| `ECHO` | Sends the text of the line back to the console. |
+| `ECHO` | Writes the line to the firmware log (**not** to the console). |
 | `FIRMWARE_RESTART` | Stops the printer software and asks for a full restart. |
 | `HELP` | Lists the commands that have a help text. |
 | `M110` | Does nothing (accepted only so that slicers/hosts do not get an error). |
@@ -802,14 +802,16 @@ Nine basic commands: talking to the console, asking the printer about itself, re
 
 ---
 
-## `ECHO` — Send a line back to the console
+## `ECHO` — Write a line to the firmware log
 
 ### What it does
 
-1. Takes the **whole command line exactly as it was typed** (including the word `ECHO`) and sends it back to the console / terminal of Mainsail.
-2. It is shown in the console only; it is **not written to the log**.
+1. Takes the **whole command line exactly as it was typed** (including the word `ECHO`) and passes it to the "info" responder **with its console flag off**.
+2. With that flag off the responder **only writes the line to the firmware log** (on a Rinkhals printer `/tmp/gklib.log`). **It is not sent to the Mainsail console**, whether typed in the console or run from a print file. *(Read from the disassembly of `Cmd_ECHO` and `Respond_info`, 2026-11-13; a user test confirmed that `M115` from a print file shows in the console and `ECHO` does not. An earlier version of this guide said the opposite: that was wrong.)*
 
-It has no parameters and changes nothing in the printer. Useful in a macro to leave a visible trace, or to check that the connection to the printer works.
+To print your own text in the console, a macro with `action_respond_info` is needed (that action calls the responder with the console flag on); see `ORCA_SLICER_GCODE.md`.
+
+It has no parameters and changes nothing in the printer. The only use is to leave a trace in the log (for example to mark a step of a start code when you read `gklib.log`).
 
 ### Syntax
 
@@ -822,11 +824,11 @@ ECHO [any text]
 ```
 ECHO hello
 ```
-The console shows `ECHO hello` (the word `ECHO` is part of the answer).
+Nothing appears in the console; the log gets a line containing `ECHO hello`.
 
 ### Notes and cautions
 
-- `ECHO` always repeats the command word too; it does not strip it.
+- The logged text is the whole line, including the word `ECHO`.
 
 ---
 
@@ -3421,6 +3423,7 @@ A **macro** is a named G-code command defined in `printer.cfg` as a `[gcode_macr
 - **Recursion guard**: a macro that (directly or via others) calls itself stops with the error **`Macro <NAME> called recursively`**. Like the unknown-variable error below, it is returned as an *internal* error, so it puts the printer in the shutdown state.
 - **Errors inside a macro** are written to the log (`GCodeMacro Run_gcode_from_command error: …`); they are **not** shown on the console and the macro command itself still reports success. (A failing G-code command *inside* the macro, e.g. a missing parameter, does reach the console.)
 - Optional config keys: `description:` (help text) and `rename_existing:` (rename a built-in command so the macro can replace it and still call the original; error `Existing command '…' not found in gcode_macro rename` if the name does not exist).
+- **A macro line placed directly in a print file does not run (observed on a printer, 2026-11-13).** `MOVE_HEAT_POS` as a line of a G-code file, and custom macros (`MSG`, `MSGTEST`), did nothing and the job ended with the motors released and no message; the same macros work typed in the console. Built-in commands work from files, and macros called from inside built-in commands work too (`G9111` runs `MOVE_HEAT_POS`, `G9112` runs `WIPE_NOZZLE`). The cause was not found in the firmware code (the macro handler is the same in both cases). So: do not rely on macros in a slicer's start/end G-code; use plain commands.
 - No macro here waits for temperature or checks homing: they just send the G-code lines. They assume the printer is **homed** and the **nozzle is clean-able** (hot enough, bed clear).
 
 ---
