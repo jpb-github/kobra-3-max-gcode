@@ -5958,3 +5958,180 @@ Shows all registers of the X driver: use `DRV_STATUS` (over-temperature, short c
 ---
 
 *End of chapter 26.*
+
+
+---
+
+# Chapter 27 — Timelapse
+
+Two commands drive the timelapse function: `SNAPSHOT` (send one message to the camera program) and `TIMELAPSE` (send a message and/or switch the function on or off). The firmware itself does not handle pictures or video. It only sends short text messages (`0`, `1` or `2`) over the network to the printer's **camera program** (`gkcam`), which grabs the pictures and builds the video. What `gkcam` does with each message is explained in the section "What the camera program does" below (read from its code).
+
+**You only need this chapter if the printer has the Anycubic camera.** Without a camera the messages go nowhere and nothing visible happens (errors in sending are only written to the log).
+
+| Command | What it does |
+|---|---|
+| `SNAPSHOT V=<0\|1\|2>` | Send one message to the camera program |
+| `TIMELAPSE [V=<0\|1\|2>] [E=<0\|1>]` | Send a message (as `SNAPSHOT`) **and/or** switch the timelapse function on or off |
+
+## How the messages work
+
+Each message is the single character below, sent as a network (UDP) packet to port 10086 of the printer itself:
+
+| Message | Meaning for the camera program |
+|---|---|
+| `0` | Prepare a new timelapse video (sent at the start of a print) |
+| `1` | Add one frame to the video now |
+| `2` | Sent by the firmware at the end/cancel, but the camera program does **not** act on it (see below) |
+
+If the packet cannot be sent, an error line goes to the log and the command still finishes without an error on the console.
+
+## What the firmware does by itself during a print
+
+When the timelapse function is **on** (flag set by `TIMELAPSE E=1`, or by the touchscreen through the web request `timelapse/set_config`; **off by default after every restart**):
+
+1. **Print start**: sends `0` and marks the timelapse as *running*.
+2. **Each new layer** (the firmware detects layer changes from the `;LAYER_CHANGE` / `;LAYER:` lines of the file): if a timelapse is running, takes a picture. How depends on the setting `timelapse_type` that the slicer writes in the G-code header (`; timelapse_type = 0` or `1`; the sample files of the printer all have `0`):
+   - **`0`** — the picture is taken where the head is (sends `1`). Any parking of the head must be in the G-code itself.
+   - **`1`** — the firmware parks the head for each picture:
+     1. Retract and lift: `G91`, `G1 Z0.4 E-<r> F300`, `G90`, where `<r>` is the retraction length given in the file header (`; filament_retract_length = …`), or **1.5 mm** if the header has none (or a value of 0 or less).
+     2. Saves the position/state (`SAVE_GCODE_STATE NAME=timelapse`).
+     3. Moves to the picture position `G1 X<snap_x_pos> Y<snap_y_pos> F12000` (stock `[timelapse]`: X457 Y220 — the right edge of the bed, middle depth) and waits for the moves to finish (`M400`).
+     4. Waits 0.5 s so the camera image is still, sends `1` (picture), then `G4 P400` (0.4 s).
+     5. Returns with `RESTORE_GCODE_STATE NAME=timelapse MOVE=1 MOVE_SPEED=12000` (the speed number is in mm/s and is much higher than the printer can do, so the normal speed limits decide how fast the head returns).
+     6. Un-retracts: `G91`, `G1 E<r> F300`, `G90`.
+   - any other value: no picture.
+3. **End of print** (finish): only if running:
+   - type `1`: if X and Y are not homed, `G28 X Y`; moves to the picture position (`G1 X… Y… F12000`, `M400`), sends `1` (last picture), waits 0.4 s, sends `2` (no effect in the camera program; it finishes the video itself), and then `M84` (motors off, to verify).
+   - type `0`: sends `1`, waits 0.4 s, sends `2`; no movement.
+4. **Cancel**: if running, sends `2` and clears the running mark. (The camera program finishes the video by itself when the print state becomes cancelled.)
+
+The commands `SNAPSHOT` and `TIMELAPSE` below send their messages **directly**, whether the function is on or not and whatever the print state is.
+
+## What the camera program does (`gkcam`)
+
+`gkcam` is a separate program started with the printer (it also does the live camera view and the cloud video link). The timelapse part works like this (read from its code, not tested):
+
+1. **It must be armed.** The printer's app service (`gkapi`, for the touchscreen / cloud app) sends `gkcam` a JSON message over the network link between the two programs. `gkcam` reads the address and port of that link from its configuration file (`api.cfg`; not examined further, it holds credentials). The message has this shape (the names are the ones searched for in the code; the exact framing around it was not traced):
+
+   ```
+   {"video_stream_request": {"id": <number>, "method": "openDelayCamera",
+                             "params": {"filepath": "<path of the .gcode file>"}}}
+   ```
+
+   - `openDelayCamera` arms the timelapse and remembers the `filepath`. If the camera is not ready it answers with the error `11401`; if `filepath` is missing it answers with an error without text.
+   - `closeDelayCamera` disarms it.
+   - The method name is matched by "contains", so extra text around it does not matter.
+   - Without arming, frames (`1`) are ignored. The arming is cleared by the end of the print (see 5), so it must be sent again for every print.
+
+   Nothing in G-code or in the firmware's `[timelapse]` section arms it: the `E=1` flag and this arming are two separate switches, and a video only appears if both are on.
+2. **Message `0`**: creates the folder `/useremain/app/gk/Time-lapse-Video/`, deletes any leftover `*.tmp` file there, and opens a new video file `timelapse.tmp` (1280 x 720, H.264 in an MP4 container).
+3. **Message `1`**: marks that the next camera image must be added; the camera loop takes the next frame and writes it into the video, then clears the mark. So each `1` adds exactly **one frame** (one frame per layer is what makes it a timelapse).
+4. **Message `2`**: the code that receives the messages only looks for `0` and `1`; `2` is ignored.
+5. **End of the video**: `gkcam` also watches the print status itself (it receives the `print_stats` state of the printer). When the state becomes `complete` or `cancelled` and the timelapse was armed, it disarms, closes the video and renames `timelapse.tmp` into the final file (see "Name of the finished video" below). It also writes a `.jpg` preview image. Before that it keeps the folder to at most 20 entries: while there are more than 19, it deletes the oldest.
+
+### Name of the finished video
+
+The name is **not** a time stamp. It is built like this:
+
+1. Take the `filepath` given when arming; keep only the part after the last `/`, cut at the first `.gcode`. Example: `/useremain/app/gk/gcodes/3DBenchy_18m.gcode` gives `3DBenchy_18m`.
+2. Look for the first free number from `01` to `99`: the first `NN` for which `<name>_NN.mp4` does not yet exist in the folder (so a number freed by deleting a video is used again).
+3. The file is `/useremain/app/gk/Time-lapse-Video/<name>_<NN>.mp4`, for example `3DBenchy_18m_01.mp4`, then `3DBenchy_18m_02.mp4` for the next print of the same file.
+4. The preview image is named `<name>_<NN>_<frames>.jpg` where `<frames>` is the number of frames in the video (counted as `1` messages received since the last `0`); older previews of the same video name are removed first.
+
+If all 99 numbers are taken, the number part stays empty (the name would end in `_.mp4`; inferred from the code, not a normal case).
+
+So the video is finished by the print state, not by the `2` message. A video is also produced on a cancel (with the frames taken so far). Videos are on the printer in `/useremain/app/gk/Time-lapse-Video/`.
+
+---
+
+## `SNAPSHOT` — Send a message to the camera program
+
+### What it does
+
+Reads `V` and sends the corresponding message: `V=0` → `0` (prepare a new video), `V=1` → `1` (add one frame), `V=2` → `2` (ignored by the camera program). Any other value does nothing. No movement, no check of the on/off flag, no answer on the console.
+
+### Syntax
+
+```
+SNAPSHOT [V=<0|1|2>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `V` | Message to send | `0` prepare a new video, `1` add one frame, `2` no effect | 0 (so a bare `SNAPSHOT` sends **start**, not a frame!) |
+
+### Examples
+
+```
+SNAPSHOT V=1
+```
+Take one picture where the head is now.
+
+### Notes and cautions
+
+- `SNAPSHOT` alone sends `0`, which restarts the video file (the frames already in it are lost, because `timelapse.tmp` is deleted and recreated); write `V=1` for a frame.
+- For a picture at a fixed spot, put the moves yourself before the command (for example `G1 X457 Y220 F12000`, `M400`, `G4 P500`, `SNAPSHOT V=1`).
+- Because the printer's own timelapse sends `1` at each layer when it is on, using `SNAPSHOT V=1` at the same time adds extra pictures.
+
+---
+
+## `TIMELAPSE` — Control the timelapse function
+
+### What it does
+
+1. Reads `V` (default −1). If it is 0, 1 or 2, sends that message exactly as `SNAPSHOT` does; otherwise nothing is sent.
+2. Reads `E` (default −1). `E=1` switches the timelapse function **on**, `E=0` switches it **off**; other values leave it as it is.
+
+The `E` flag is the one the print-start / layer / end actions above check. It can also be set from the touchscreen (web request `timelapse/set_config` with `enable` = 0 or 1). The flag is **not saved**: after a restart it is off again.
+
+### Syntax
+
+```
+TIMELAPSE [V=<0|1|2>] [E=<0|1>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `V` | Message to send to the camera program (same as `SNAPSHOT`) | `0`, `1`, `2` | −1 (nothing sent) |
+| `E` | Switch the automatic timelapse on or off for the next print(s) | `1` on, `0` off | −1 (unchanged) |
+
+### Examples
+
+```
+TIMELAPSE E=1
+```
+Turns the automatic timelapse on (a start message is sent at the next print start, then a picture at every layer).
+
+```
+TIMELAPSE E=0 V=2
+```
+Turns it off and sends `2` (which the camera program ignores; the video is finished by the end of the print, see above).
+
+### Notes and cautions
+
+- In a slicer's start G-code, `TIMELAPSE E=1` can enable the function per print; the function has to be on **before** the print starts for the start message to be sent (the start message is sent when the print is started by the firmware, so a command inside the file comes too late for `0`).
+- Parameters are written like `V=1` (with `=`); the values are whole numbers.
+
+---
+
+## The web request `timelapse/get_config`
+
+The touchscreen reads the state of the function with the web request `timelapse/get_config`. It returns one value, `enable` (1 = timelapse function on, 0 = off), which is the same flag `TIMELAPSE E=` sets. The companion request `timelapse/set_config` takes `enable` (0 or 1) and sets that flag; any other value leaves it unchanged. No other setting (picture position, type) can be read or written this way.
+
+---
+
+### To verify (not tested on a printer)
+
+- The `gkcam` description comes from reading its code (stripped program, no names). The video naming (`<name>_NN.mp4`, first free number 01–99) and the arming message (`video_stream_request` with `method` `openDelayCamera` and `params.filepath`) were traced in the code; the framing of the link between `gkapi` and `gkcam` (address, port, any header around the JSON) and what exactly the 20-entry cleanup counts (all files or only videos) were not.
+- Whether the touchscreen actually sends `openDelayCamera` before each print (it is the only thing found that can arm the timelapse; `gkapi` / `K3SysUi` were not searched).
+- Whether `M84` really follows the final picture in the "type 1" end sequence.
+- Whether any slicer profile calls `SNAPSHOT` / `TIMELAPSE` in the G-code (none of the 17 sample files does; they only carry `; timelapse_type = 0`).
+- The `_disconnect` handler of the timelapse module (not examined).
+
+---
+
+*End of chapter 27.*
