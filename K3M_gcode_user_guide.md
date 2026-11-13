@@ -4811,3 +4811,333 @@ No parameters.
 ---
 
 *End of chapter 21.*
+
+
+---
+
+# Chapter 22 — Print job (virtual SD card): `SDCARD_PRINT_FILE`, `SDCARD_RESET_FILE`, `M73`, power-loss recovery, `SLEEP_MODE`
+
+These commands deal with the *print job itself*: loading a G-code file and starting it, forgetting it, telling the screen how far the print has progressed, and the power-loss recovery ("continue after power cut"). The job reader is called the "virtual SD card"; in `printer.cfg` it is the `[virtual_sdcard]` section (stock: `path: /useremain/app/gk/gcodes/` and `enable_continue_print: 1`).
+
+| Command | Purpose |
+|---|---|
+| `SDCARD_PRINT_FILE` | Load a `.gcode` file and start printing it |
+| `SDCARD_RESET_FILE` | Forget the loaded file (stops reading it); heaters and motors are not touched |
+| `M73` | Report progress and remaining time (written by the slicer into the file, shown on the screen) |
+| `SET_RESTORE_POWER_OFF` | Switch the power-loss recovery on/off while the printer runs |
+| `SDCARD_RESUME_PRINT` | Resume a print interrupted by a power cut (`ENABLE=1`), or discard the saved record (`ENABLE=0`) |
+| `SDCARD_OPEN_PRINT_PREV_OP` | Ask for the three pre-print operations (auto-level, vibration/resonance, flow calibration) for the next print |
+| `SLEEP_MODE` | Motors off, fan off, heaters off |
+
+There is **no** `M20`–`M30`, `M23`, `M24`, `M25`, `M26`, `M27` (SD-card commands) in this firmware: only the commands above exist. Pausing is chapter 21.
+
+**Note on errors in this chapter.** Several commands below answer wrong use with an error that the firmware *returns* (as opposed to a console-only message). According to the rule found for chapters 15–16, such an error puts the printer into **shutdown**, which on this printer is recovered by **switching it off and on** (not `FIRMWARE_RESTART`). This is inferred from the general rule, not tested; it is the reason the cautions below say "do not".
+
+---
+
+## `SDCARD_PRINT_FILE` — Load a file and start printing
+
+### What it does
+
+1. **If the SD reader is already busy** (a job is running or a read timer exists): writes a warning in the log (`SD busy detected, forcing cleanup`), then drops the old job exactly like `SDCARD_RESET_FILE` does (see below) before continuing. It does **not** turn heaters off or park the head, so sending this during a print replaces the job under a hot nozzle. Do not do it.
+2. Reads the file name (`FILENAME`, required) and loads it:
+   - Quote characters `"` around the name are removed.
+   - The name **must end in `.gcode`** (lower case) — otherwise the file is refused (message in the log: `Gcode file extension incorrect`).
+   - A name **without `/`** is looked up in the folder of the `[virtual_sdcard]` `path` setting (stock `/useremain/app/gk/gcodes/`).
+   - A name **containing `/`** is, from the code, joined to the root folder `/`, i.e. treated as a path from the root of the printer's file system, not as a path relative to the G-code folder (to verify — the help text, copied from Klipper, claims "subdirectories").
+   - The file must exist (`Unable to open file`) and must not be empty (`Gcode file is empty`).
+3. Reads the file's header lines and its last lines (slicer name, layer height, temperatures, `; max_z_height:`, model size, nozzle diameter, `by object` marker, speed meta data, …). This information feeds the status shown on the screen (see `M73` and the status fields at the end of this section).
+4. **Checks the file against the machine** — a failure stops the print and the message goes to the screen/log:
+   - the nozzle diameter declared in the header (`; nozzle_diameter = 0.4`; first value if a list) must be **exactly equal** to the printer's `nozzle_diameter` of `[extruder]` (stock 0.4) — checked first, only when the header gives one (verified);
+   - **only if the file has the four lines `; print_bed_min =`, `; print_bed_max =`, `; first_layer_print_min =`, `; first_layer_print_max =`** (the lines the Anycubic slicer writes, chapter 3): these X/Y values must not exceed the axis maximum (`position_max` of `stepper_x` / `stepper_y`). What is really compared (verified in the code): for **X** the X of `print_bed_max` and the X of `first_layer_print_min`; for **Y** the Y of `first_layer_print_min` and the Y of `first_layer_print_max`. This is an odd mixture (the X of `first_layer_print_max` is never checked), most likely a slip in the firmware, but harmless with normal files (e.g. `print_bed_max = 426,420` against X 457);
+   - the model height (header `; model_size`) and `; max_z_height:` must not exceed the Z axis maximum (`position_max` of `stepper_z`).
+5. If a filament hub (ACE) is configured, asks it to check that the colours/spools the file needs are available (`check_ready`); if it says no, the print is stopped. It also reads the file in the background to learn which tools `T…` and which first-layer area (adaptive mesh, chapter 3) it uses.
+6. Looks at the saved configuration (`printer_mutable.cfg`): if it contains **no `[input_shaper]` section** (no shaper calibration was ever saved), a log error is written (`The device is no resonance…`) and the job gets the **"resonance" pre-print operation** switched on (see `SDCARD_OPEN_PRINT_PREV_OP` below: nozzle and bed are started heating and the state shows `resonance` before the file's own lines run). On a printer that has a saved shaper this does not occur.
+7. Starts the job: the file is read line by line from the beginning and executed. State becomes `printing`.
+
+**When something is refused (steps 2, 4, 5)** the firmware does not simply reject: it runs its **cancel routine** (events `reset_file` and `cancel_print`, then the clean-up of chapter 21's `CANCEL_PRINT`: heaters off, fan off, lift, motors off…). The command itself then ends without an error. So a mistyped file name on a hot printer also switches the heaters off and un-homes the printer.
+
+### Syntax
+
+```
+SDCARD_PRINT_FILE FILENAME=<name.gcode>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `FILENAME` | The G-code file to print. | A name ending in `.gcode`, with or without quotes; a name with `/` is taken from the file-system root (see above) | none — required (missing → error `Error on 'SDCARD_PRINT_FILE': missing FILENAME`, shown on the console only) |
+
+### Examples
+
+```
+SDCARD_PRINT_FILE FILENAME=cube.gcode
+```
+Prints `cube.gcode` from the stock G-code folder.
+
+```
+SDCARD_PRINT_FILE FILENAME="my part.gcode"
+```
+The quotes allow a space in the name (the quotes are removed).
+
+### Notes and cautions
+
+- The file's own start code (for the Anycubic slicer `G9111`, chapter 2, then `M117` — see chapter 5) does the heating, homing and mesh. `SDCARD_PRINT_FILE` itself heats nothing.
+- Files with an upper-case extension (`.GCODE`) or another extension are refused, and the refusal triggers the cancel routine described above.
+- Status fields filled from the file (read with the Moonraker `virtual_sdcard` object, for example by Mainsail): `progress`, `file_position`, `file_size`, `total_time`, `remain_time`, `time_left`, `total_layer`, `current_layer`, `layer_height`, `filament_type`, `bed_temperature`, `extruder_temperature`, `model_size_x/y/z`, `slicer`, … They are taken from the slicer's comment lines; a file from a slicer that does not write them leaves them at their default (0 or −1).
+- At each layer change comment (`;LAYER:` or `;LAYER_CHANGE`) the print counts one more layer, and — with the power-loss recovery on — saves a recovery record (see `SDCARD_RESUME_PRINT`).
+
+---
+
+## `SDCARD_RESET_FILE` — Forget the loaded file
+
+### What it does
+
+1. **If the command is itself executed from the print file** (a line of the G-code file calls it): refuses with the error `SDCARD_RESET_FILE cannot be run from the sdcard`. This error is returned, so it is a shutdown-type error (inferred, see the note at the top).
+2. Otherwise: if a file is open, stops the reading (the print job timer is stopped) and closes the file.
+3. Clears **everything the firmware knew about the job**: file position and size, progress, remaining times (set back to "unknown"), layer counters, slicer information, filament and temperature information, model size, speed meta data, adaptive-mesh data, the calibration marks.
+4. Sends the event `printer_macro:reset` (listeners such as the print statistics see the job as gone).
+
+It does **not** turn heaters or fan off, does not move anything and does not run the cancel routine (compare `CANCEL_PRINT`, chapter 21). Whether the print-state text ("printing"/"paused"…) is changed by it was not checked (to verify).
+
+### Syntax
+
+```
+SDCARD_RESET_FILE
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+SDCARD_RESET_FILE
+```
+From the console, after `CANCEL_PRINT`, to clear a stuck "file loaded" display.
+
+### Notes and cautions
+
+- Use `CANCEL_PRINT` to end a print properly; `SDCARD_RESET_FILE` is only the bookkeeping part.
+- Do not put it in a G-code file (error above).
+
+---
+
+## `M73` — Progress and remaining time
+
+### What it does
+
+Stores the values given and nothing else (no move, no heating, no message). The Anycubic slicer writes a line such as
+
+```
+M73 P12 R7.5 QUIETR14.3 SPORTR5.2
+```
+
+at every percent of the print. The values are used by the status that the screen and Mainsail show:
+
+- **`P`** → the progress of the print in %, shown as `progress` (a fraction 0–1).
+- **`R`**, **`QUIETR`**, **`SPORTR`** → the remaining time **in minutes** at the *standard*, *quiet* and *sport* speed modes (the speed mode is the one chosen on the touchscreen, chapter 19, `M222`/`set_velocity`). They are stored in seconds (×60).
+
+How the status is derived:
+
+- `progress`: the value of `P` if one was received, otherwise file position ÷ file size.
+- `remain_time`: the value stored for the **current speed mode** (quiet = `QUIETR`, standard = `R`, sport = `SPORTR`). If that value is "unknown" (−1, which is the case after loading a file and before the first `M73`), it is computed as (1 − progress) × `total_time`, where `total_time` is the estimated print time from the file header.
+- `time_left`: a second remaining-time field, chosen from the current speed factor (≤ 80 % → `QUIETR`, ≥ 120 % → `SPORTR`, between → another stored value), else the same fallback computation, else −1. Its values are multiplied by 60 once more than `remain_time`, so its unit looks inconsistent (to verify; `remain_time` is the field to use).
+
+### Syntax
+
+```
+M73 [P<percent>] [R<minutes>] [QUIETR<minutes>] [SPORTR<minutes>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `P` | Progress in %. | 0 to 100 (outside this range → console error, nothing stored) | −1 = not given (progress is then computed from the file position) |
+| `R` | Remaining time at standard speed, in minutes. | number | −1 → see warning below |
+| `QUIETR` | Remaining time at quiet speed, in minutes. | number | −1 → see warning below |
+| `SPORTR` | Remaining time at sport speed, in minutes. | number | −1 → see warning below |
+
+### Examples
+
+```
+M73 P50 R30 QUIETR38 SPORTR26
+```
+Progress 50 %, 30 min remaining at standard speed, 38 at quiet, 26 at sport.
+
+### Notes and cautions
+
+- **Every call overwrites all four values.** A parameter that is left out is not "kept": `P` goes back to −1 (progress then follows the file position) and, from the code, `R`, `QUIETR` and `SPORTR` are stored as −1 **×60 = −60** s, which is not recognised as "unknown" — so a call like `M73 P50` alone would show a remaining time of −60 s (to verify; a slicer always gives all four).
+- The values are lost when the file is reset/cancelled (they return to −1).
+- A file without `M73` lines (other slicers) still shows `progress` from the file position, and `remain_time` from the header estimate if it has one.
+
+---
+
+## `SET_RESTORE_POWER_OFF` — Power-loss recovery on/off
+
+### What it does
+
+Stores the number given in the "power-loss recovery" setting, **in memory only** (it is not written to `printer.cfg` and is read again from `enable_continue_print` at the next start). Nothing is printed.
+
+The setting has two roles:
+
+- while it is **exactly 1**, the print saves a recovery record at every layer change (from the second layer on) — see `SDCARD_RESUME_PRINT`;
+- `SDCARD_RESUME_PRINT` refuses to run when it is **0**.
+
+### Syntax
+
+```
+SET_RESTORE_POWER_OFF [ENABLE=<n>]
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `ENABLE` | New state. | `1` = on; `0` = off. Any other whole number is stored but behaves as a half-on state (recovery is allowed but no record is saved) — do not use. | `0` |
+
+### Examples
+
+```
+SET_RESTORE_POWER_OFF ENABLE=0
+```
+Stop saving recovery records for the rest of the session (for example for a test print).
+
+```
+SET_RESTORE_POWER_OFF ENABLE=1
+```
+Switch it back on. (A bare `SET_RESTORE_POWER_OFF` switches it **off**.)
+
+### Notes and cautions
+
+- To make the choice permanent, change `enable_continue_print` in `[virtual_sdcard]` (stock `1`). The firmware reads it as a whole number.
+- Switching it off does not delete an existing record (use `SDCARD_RESUME_PRINT ENABLE=0` for that — and it refuses while the setting is 0, so delete first).
+
+---
+
+## `SDCARD_RESUME_PRINT` — Continue after a power cut
+
+### What it does
+
+While power-loss recovery is on, the printer writes a small record every layer (numbered files, 11 of them in rotation, so a record is never half-written). The record holds the G-code state (`SAVE_GCODE_STATE NAME=POWER_OFF`: position, speeds, factors, modes), the file name and position, the nozzle and bed targets, the fan speed, the progress values and the elapsed print time. At the end of a normal print and at a cancel the records are deleted.
+
+After a power cut the screen finds the record (it answers `Print record does not exist` when there is none) and offers to continue. The command does the work:
+
+1. **If the recovery setting is 0:** error `The power outage function has been turned off.` (returned error → shutdown type, inferred).
+2. **If a print is running:** error `printing` (same remark).
+3. `ENABLE` is **required**:
+   - **`ENABLE=0` (or anything but 1): discard.** The saved records are deleted and nothing else happens.
+   - **`ENABLE=1`: resume.** The command reads the records, takes the most recent valid one, reopens the G-code file at the saved position, restores the exclude-object list, and starts the recovery sequence, which runs by itself:
+     1. nozzle target **185 °C** (no wait) and the saved **bed** target (no wait), so heating starts at once;
+     2. homes **X and Y only** — `G28 X Y` (Kobra 3 / 3 V2) or `HOME_XY` (Max and others, see chapter 12) — and sets the motors to the non-silent mode (`CLOSE_STEALTHCHOP`, chapter 26) for X, Y (and Y1 on the Max); **Z is not homed** — the printer reads the last Z height it had written to a small file (`last_z`, kept while printing) and declares the toolhead to be at that height without moving (an internal helper; exact details to verify). It also reapplies the saved first-layer speed settings and the absolute/relative extruder mode;
+     3. waits 0.1 s;
+     4. heats the nozzle to the saved temperature and **waits** (`M109`), then the bed (`M190`) and waits;
+     5. (non-ACE printers) `G92 E0`, then **`G1 E100 F300`: extrudes 100 mm at 5 mm/s** (about 20 s) to refill the nozzle, waits for the move, then `G4 P3000` (3 s) and turns the **part-cooling fan on at full speed** (the fan routine takes 0–255 and 255 = 100 %, verified; the fan speed saved in the record is not set here);
+     6. `RESTORE_GCODE_STATE NAME=POWER_OFF MOVE=1 MOVE_SPEED=50` — goes back to the saved X/Y/Z position at **50 mm/s** and restores speeds and modes (chapter 19);
+     7. marks the print as `printing`, restarts the print statistics and starts reading the file from the saved line.
+   - With the ACE hub in use, steps 5–6 are done by the filament hub instead (not detailed).
+
+### Syntax
+
+```
+SDCARD_RESUME_PRINT ENABLE=<0|1>
+```
+
+### Parameters
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| `ENABLE` | `1` = resume the interrupted print; anything else (use `0`) = delete the saved record without printing. | whole number | none — required (missing → console error `Error on 'SDCARD_RESUME_PRINT': missing ENABLE`) |
+
+### Examples
+
+```
+SDCARD_RESUME_PRINT ENABLE=1
+```
+Continue the interrupted print (the screen sends this when you press "Continue").
+
+```
+SDCARD_RESUME_PRINT ENABLE=0
+```
+Throw the saved record away ("Cancel" on the recovery dialog).
+
+### Notes and cautions
+
+- **Z is not re-homed.** The print continues at the Z the printer thinks it had at the cut. If the bed or the head was moved by hand after the cut (or the printer lost steps), the continuation will be at the wrong height. Check by eye before pressing continue.
+- The recovery is as precise as the layer boundary (inferred): the print restarts from the saved file line, which is the start of the layer in which the cut happened (a record is written at each layer change), so the layer is repeated from its beginning on top of what was already printed (inferred from where the record is written).
+- The nozzle is heated to the **saved** temperature, but for the first moments the nozzle target is 185 °C; the 100 mm purge happens at the saved temperature (after `M109`).
+- Records exist only from the **second layer**; a power cut during the first layer cannot be resumed.
+- A failed command in this chapter that returns an error (the two errors above) should be treated as shutdown-type: power-cycle the printer.
+
+---
+
+## `SDCARD_OPEN_PRINT_PREV_OP` — Calibration-job marks
+
+### What it does
+
+Sets the three **pre-print operation** marks at once: **auto-leveling**, **resonance (vibration) measurement** and **flow (pressure-advance) calibration**. The touchscreen sets them one by one from its print-start options; this command sets all three. Nothing happens when it is run; the marks are used by the **next print** (`SDCARD_PRINT_FILE`). They are processed when the job starts, before the first line of the file is read (verified in the code, the exact effect of each step not tested), and are **cleared right afterwards**, and also when a print ends or is cancelled:
+
+1. If the file header says `; test_mode: 1`, all three marks are dropped (the file declines the operations); `; test_mode: 2` only writes a log error (`AC Slicer test_mode 2 is not support!`). The event `flow_calibration:reset_status` is sent.
+2. **Flow calibration mark** — only when an ACE hub is connected: the print state becomes `flow_cali` and `PA_AUTO_CALIBRATE USE_ACE=0` is run (chapter 4); the configuration is saved (`SAVE_CONFIG`) when that routine does not report a failure. Without ACE this mark does nothing.
+3. **Resonance mark**: the print state becomes `resonance`; unless the flow mark is also set, the bed is started heating to the file's first-layer bed temperature (`M140`, no wait) and the nozzle to the `[leviQ3] extru_end_temp` value (`M104`, no wait; stock 140 °C). The actual vibration test is **not** started by this code (it is run by the touchscreen separately, to verify).
+4. **Leveling mark**: the print state becomes `leveling`; `LEVIQ_AUTO_ZOFFSET_ON_OFF ON_OFF=1` is run (chapter 14), the `[leviQ3] bed_temp_cfg` value is set to the file's bed temperature (a log line `bed temperature mismatch: cfg:… -model:…` appears when they differ) and `LEVIQ B=<bed temperature>` is run (chapter 14: preheat, wipe, probe).
+5. The marks are cleared, the state becomes `printing` and the file is read.
+
+A mark is skipped when the print state is already `error`.
+
+### Syntax
+
+```
+SDCARD_OPEN_PRINT_PREV_OP
+```
+
+### Parameters
+
+None.
+
+### Notes and cautions
+
+- Mostly for the touchscreen; its help text (copied from another command) is wrong. Typing it before `SDCARD_PRINT_FILE` makes that print start with the leveling routine (probing the bed, heating to the file's bed temperature) and, with an ACE hub, a pressure-advance calibration — even if the file's own start code does a leveling too.
+- If the file has `; test_mode: 1` the marks are ignored.
+
+---
+
+## `SLEEP_MODE` — Everything off
+
+### What it does
+
+1. Turns **all motors off** (like `M84`, chapter 15: this un-homes X, Y and Z).
+2. Sets the part-cooling **fan to 0**.
+3. Sets the **target of every heater** (nozzle and bed) to **0** (it also clears an internal state flag of each heater, meaning not known).
+4. Only on the **Kobra 3** and **Kobra 3 V2**: sends the event `led_off` (on the Max the event is not sent, so **nothing happens to a light**; inferred from the model test in the code).
+
+It does not wait for anything, does not park the head and prints nothing.
+
+### Syntax
+
+```
+SLEEP_MODE
+```
+
+### Parameters
+
+None.
+
+### Examples
+
+```
+SLEEP_MODE
+```
+Cool everything down and release the motors in one command, for example at the end of a G-code file instead of `TURN_OFF_HEATERS`, `M107`, `M84`.
+
+### Notes and cautions
+
+- Unlike `TURN_OFF_HEATERS` + `M84`, it does not go through the normal delayed heater/fan queue: the fan and heater targets change immediately.
+- The touchscreen's "sleep" function is not this command alone (the screen blanks itself); this only does the machine side.
+
+---
+
+*End of chapter 22.*
