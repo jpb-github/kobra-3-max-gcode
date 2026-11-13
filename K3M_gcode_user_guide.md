@@ -6118,6 +6118,40 @@ Turns it off and sends `2` (which the camera program ignores; the video is finis
 
 ---
 
+## Using a USB camera, and Rinkhals
+
+**Is the camera special?** Probably not. `gkcam` opens cameras the standard Linux way (`/dev/video0`, `/dev/video1`, …, Video4Linux) and the strings of the program show no brand or USB-ID check, so the Anycubic camera is most likely an ordinary USB (UVC) camera and another one may work (not tested). Two conditions: the camera must be able to deliver the 1280 x 720 size the timelapse video uses, and `gkcam` must be able to open it (it fails with "UsbCameraOpen … failed" otherwise).
+
+**With Rinkhals the camera belongs to `mjpg_streamer`.** The Rinkhals app "mjpg-streamer" (read in the Rinkhals source on GitHub, not checked on the printer) works like this:
+
+- For camera 0, if a resolution is chosen in the Rinkhals app settings, it **stops `gkcam`** and starts `mjpg_streamer` on that camera (HTTP port 8080; the Mainsail webcam address `/webcam/?action=stream` and the snapshot address `/webcam/?action=snapshot` come from it). A camera can normally be opened by one program at a time, so the stock timelapse of this chapter cannot work in this state: `SNAPSHOT` and `TIMELAPSE` send their messages, but nobody is there to use them.
+- The setting for camera 0 has the choice **`Anycubic`**: `mjpg_streamer` then leaves the camera alone and `gkcam` keeps it (stopping the app also restarts `gkcam`). The Mainsail live view then stops working.
+- A second USB camera is served by `mjpg_streamer` on port 8081 (a third on 8082, …), and does not conflict with `gkcam`, which uses camera 0.
+- Rinkhals has **no timelapse function of its own** (the repository has no timelapse code or Moonraker timelapse component; only the live stream and snapshots).
+
+**Checks on the printer (read-only, over SSH):**
+
+```
+ls -l /dev/video*
+lsusb
+cat /sys/class/video4linux/video0/name
+ps | grep -E "gkcam|mjpg"
+```
+
+The first shows whether the system sees a camera, the second which USB devices are connected, the third the camera name, the fourth which of the two programs is running (if `mjpg_streamer` is running, `gkcam` is not). In the printer of this documentation the camera is used by `mjpg_streamer`, and Moonraker lists one webcam (`mjpegstreamer-adaptive`, `/webcam/?action=stream`).
+
+**Ways to get a timelapse with a USB camera**
+
+| Option | How | Trade-off |
+|---|---|---|
+| A. Keep `mjpg_streamer`, make your own timelapse | A script (on the printer or another computer) watches the layer number in Moonraker (`print_stats.info.current_layer`, which Rinkhals fills in), saves one picture from the snapshot address at each layer change and builds the video with `ffmpeg` at the end | The live view stays. You must write and run the script. The head is photographed where it is, unless the slicer's G-code parks it (the firmware's own parking, chapter 27, only works with the stock timelapse). |
+| B. Set camera 0 to `Anycubic` in the Rinkhals app | The stock path of this chapter can run (the `gkcam` description above): `TIMELAPSE E=1` plus the arming by the app (`openDelayCamera`) | No Mainsail live view. Whether the touchscreen sends the arming message was not found, so it may not work at all. |
+| C. Two cameras | Camera 0 left to `gkcam` (`Anycubic`), a second USB camera for `mjpg_streamer` | Needs a second camera and a free USB port (or a hub). |
+
+Option A is the one that does not depend on the Anycubic software and keeps working with Rinkhals. Not tested.
+
+---
+
 ## The web request `timelapse/get_config`
 
 The touchscreen reads the state of the function with the web request `timelapse/get_config`. It returns one value, `enable` (1 = timelapse function on, 0 = off), which is the same flag `TIMELAPSE E=` sets. The companion request `timelapse/set_config` takes `enable` (0 or 1) and sets that flag; any other value leaves it unchanged. No other setting (picture position, type) can be read or written this way.
