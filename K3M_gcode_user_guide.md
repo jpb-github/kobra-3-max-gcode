@@ -2085,7 +2085,7 @@ Bed off.
 ### What it does
 
 1. Looks up the sensor named in `SENSOR`. Any heater or temperature sensor known to the printer works (`extruder`, `heater_bed`, and the sensors configured with `[temperature_…]` sections such as the host or MCU sensors). If the name is unknown the command fails with *"Unknown sensor …"*.
-2. Reads `MINIMUM` (default: no lower limit) and `MAXIMUM` (default: no upper limit). If **neither** is given it fails with *"Error on TEMPERATURE_WAIT: missing MINIMUM or MAXIMUM."*
+2. Reads `MINIMUM` and `MAXIMUM`. **In this firmware the command is broken and never returns** (see the warning below): the value of `MAXIMUM` is limited to `MINIMUM` (the port of Klipper's "`MAXIMUM` must be above `MINIMUM`" rule was put in the wrong slot of `Get_float`, so it caps the value instead of checking it; the cap is applied silently: the error is only logged and the limit is used, ch. 24). The two defaults are both parsed from the text `-inf`. If neither is given it only writes *"Error on TEMPERATURE_WAIT: missing MINIMUM or MAXIMUM."* to the log and goes on to wait.
 3. **Checks the temperature about once per second** until it is `≥ MINIMUM` **and** `≤ MAXIMUM`, then returns. It does not change any target and does not heat or cool anything by itself.
 4. Ends early if the printer shuts down.
 
@@ -2100,17 +2100,17 @@ TEMPERATURE_WAIT SENSOR=<name> [MINIMUM=<°C>] [MAXIMUM=<°C>]
 | Parameter | Meaning | Values | Default |
 |---|---|---|---|
 | `SENSOR` | The sensor or heater to watch. **Required.** | `extruder`, `heater_bed`, or a configured sensor name | — |
-| `MINIMUM` | Wait until the temperature is **at least** this. | °C | none (−∞) |
-| `MAXIMUM` | Wait until the temperature is **at most** this. | °C | none (+∞) |
+| `MINIMUM` | Wait until the temperature is **at least** this. | °C | −∞ |
+| `MAXIMUM` | Wait until the temperature is **at most** this. | °C | −∞ (not +∞ as in Klipper) |
 
-At least one of `MINIMUM` / `MAXIMUM` is needed.
+> **Warning — do not use `TEMPERATURE_WAIT` on this firmware.** The wait ends only when `MINIMUM ≤ temperature ≤ MAXIMUM`, but `MAXIMUM` is silently capped at `MINIMUM` (and at −∞ when `MINIMUM` is not given), so the window is empty (or a single exact value) and the command never returns. **Observed on a printer:** `TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=45` and `… MINIMUM=45 MAXIMUM=150` in a print start code both left the printer stuck until it was power-cycled. The cap was read in the disassembly of `Cmd_TEMPERATURE_WAIT` and `Get_float` (the second `Get_float` call passes the `MINIMUM` variable in the *maximum* slot). To wait for a temperature use `M109` / `M190` (they wait until the temperature is within ±2 °C of the target, also when cooling). The examples below show the intended syntax and do not work as described.
 
 ### Examples
 
 ```
 TEMPERATURE_WAIT SENSOR=extruder MINIMUM=190
 ```
-Wait until the nozzle is at 190 °C or more (after e.g. `M104 S200`). Unlike `M109`, this does not need to be within a window around a target and is not tied to the heater's own target.
+Intended meaning: wait until the nozzle is at 190 °C or more (after e.g. `M104 S200`), without being tied to the heater's own target. **On this firmware it never returns** (see the warning above); use `M109 S200` instead.
 
 ```
 TEMPERATURE_WAIT SENSOR=heater_bed MAXIMUM=40

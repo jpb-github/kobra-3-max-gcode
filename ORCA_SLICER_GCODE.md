@@ -70,7 +70,7 @@ M7000 BED_MESH_CLEAR                    ; no mesh while homing / wiping / measur
 ; --- 2. Start the bed, home, heat the nozzle (all while the bed heats) ---------
 M7001 Step 2 of 8 - Homing, bed preheat started, nozzle to wipe temperature
 M140 S{min(bed_temperature_initial_layer_single, 60)}   ; start bed heating now, no waiting
-G28                               ; home X, Y, Z
+G28 W                             ; home X, Y, Z with Z measured at the wiper platform (X30 Y404), like the stock G9112 does: the wipe heights assume this Z reference
 G1 Z15 F1200                     ; stay 15 mm up
 G1 X0 Y440 F9600                  ; heating spot: rear left, left of the wiper pad and behind the bed (the LeviQ3 parking spot, platform_offset_extru)
 M104 S170                         ; wipe temperature, heated right next to the pad
@@ -107,9 +107,10 @@ M400
 M7001 Step 7 of 8 - Heating to print temperatures
 G1 Z15 F1200
 G1 X457 F9600                     ; park beside the bed again
-M140 S[bed_temperature_initial_layer_single]
-M7000 TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={bed_temperature_initial_layer_single - 10}   ; bed within 10 C
-M104 S[nozzle_temperature_initial_layer]   ; only now start the nozzle: no long wait at high temperature = no ooze
+{if bed_temperature_initial_layer_single > 70}
+M190 S{bed_temperature_initial_layer_single - 10}   ; hot bed: first wait until it is 10 C below its final temperature
+{endif}
+M104 S[nozzle_temperature_initial_layer]   ; start the nozzle for the last part of the bed heat-up: no long wait at high temperature = no ooze
 M190 S[bed_temperature_initial_layer_single]
 M109 S[nozzle_temperature_initial_layer]
 M7000 LEVIQ_TEMP_OFFSET                 ; Z correction for the hot nozzle (the offset was measured at 140 C)
@@ -139,14 +140,16 @@ G92 E0
 |---|---|---|
 | 0 | four `; print_bed_… / first_layer_…` comments | The firmware only builds an adaptive mesh when these four lines exist at the start of a line. The stock Anycubic slicer writes them the same way. The bed lines are fixed to the bed of this printer (426 × 420, from `bed_shape` of the sample files); the first-layer lines come from Orca. |
 | 1 | `CLEAR_PAUSE`, `BED_MESH_CLEAR` | Clean state. A leftover mesh would bend the wipe and the Z-offset moves. |
-| 2 | `M140` → `G28` → move to `X0 Y440` → `M104/M109 S170` | The bed warms up while the printer homes. The nozzle then heats to the wipe temperature at the rear-left spot, left of the wiper pad (X42–102) and behind the bed edge (Y420), so drips fall outside the bed. `X0 Y440` is the spot the vendor's own LeviQ3 preheat uses (`platform_offset_extru`, ch. 14). |
+| 2 | `M140` → `G28 W` → move to `X0 Y440` → `M104/M109 S170` | The bed warms up while the printer homes. `G28 W` homes Z at the wiper platform (X30 Y404) instead of the bed center: the wipe macro moves to fixed heights (Z −0.8 at the ends of the pad, Z 1 over the brush) that assume this reference, and the stock `G9112` itself homes with `G28 W` when the printer is not homed. A plain `G28` (Z at the bed center) makes `G9112` skip its own homing, and the nozzle can then pass too high above the brush. The nozzle | then heats to the wipe temperature at the rear-left spot, left of the wiper pad (X42–102) and behind the bed edge (Y420), so drips fall outside the bed. `X0 Y440` is the spot the vendor's own LeviQ3 preheat uses (`platform_offset_extru`, ch. 14). |
 | 3 | `G9113`, `G9112`, back to `X0 Y440`, `M104 S140`, `M190` + `G4 P60000` | The wiper pad is off the bed, so the wipe happens while the bed is still heating. `G9112` does nothing when its "already cleaned" memory is set, so it is reset first; it also clears and reloads the mesh and switches the X/Y drivers around the wipe. While the printer waits for the bed (`M190`, only to ±2 °C) and soaks for 60 s, the nozzle target is set to 140 °C (the probing temperature `extru_end_temp`), so it cools during the wait and `LEVIQ_AUTO_ZOFFSET` finds it already there. Soak and cooling happen right before the measurements. |
 | 4 | `LEVIQ_AUTO_ZOFFSET` | Cools the nozzle to 140 °C, homes Z, measures twice (and again after a forced wipe if the result looks suspiciously small), then applies and saves the probe `z_offset` (`IS_SAVE=1` is the default and the only reliable mode, ch. 14). |
 | 5 | `BED_MESH_CALIBRATE ADAPTIVE=1 …` | Measures only the first-layer area + 5 mm (minimum 100 × 100 mm, ch. 3). The profile is called `adaptive` so the full-bed `default` mesh that `G9112` reloads is not overwritten. The mesh is taken **after** the Z offset, so it is consistent with the new offset. |
-| 6 | `M140`, `TEMPERATURE_WAIT`, `M104`, `M190`, `M109`, `LEVIQ_TEMP_OFFSET` | The bed is set first; the nozzle starts once the bed is within 10 °C, so the end of the bed heat-up and the nozzle heat-up overlap but the nozzle never waits long at high temperature (no ooze). Then `M190`/`M109` wait for both, and the thermal Z correction `(T − 140) × 0.06 / 80` is applied. |
+| 6 | `M190` (hot beds only), `M104`, `M190`, `M109`, `LEVIQ_TEMP_OFFSET` | A bed above 70 °C is first brought to 10 °C below its final temperature; the nozzle then starts, so the end of the bed heat-up and the nozzle heat-up overlap but the nozzle never waits long at high temperature (no ooze). Then `M190`/`M109` wait for both, and the thermal Z correction `(T − 140) × 0.06 / 80` is applied. |
 | 7 | `M117`, purge line | `M117` is the firmware's print-start signal, not a message (ch. 5); Anycubic's own start code has it right after the preparation. The purge is the stock `UNDERLINE` idea (about 24 mm of filament, 0.3 mm high) but drawn from X30 to X180 on the front edge, entirely on the bed (the stock one starts at X457, outside it). |
 
 ### Things to know
+
+- **Never use `TEMPERATURE_WAIT` in this firmware: it never returns.** The first two versions of step 6 used it and the printer stayed stuck with the nozzle target at 140 °C, even with `MAXIMUM` added (found on the printer, then in the firmware code: the value of `MAXIMUM` is capped at `MINIMUM` by a porting bug, so the wait window is always empty, ch. 11 of the guide). The start code now uses `M190` instead: for a bed above 70 °C it waits until the bed is 10 °C below its final temperature, then starts the nozzle heating, then waits for the bed and the nozzle. For a bed at 70 °C or less the bed is already at (or within 10 °C of) its temperature after the preheat, so the nozzle simply starts first.
 
 - **Cooling to 140 °C:** the value is `extru_end_temp` of the `[leviQ3]` section (stock 140). If you changed it, change the `M104 S140` line too. Passive cooling from 170 °C to 140 °C takes a minute or two; if it is not there when the soak ends, `LEVIQ_AUTO_ZOFFSET` just waits for the rest. To speed it up you can add `M106 S255` before the soak (the firmware turns the fan off itself in `LEVIQ_AUTO_ZOFFSET`).
 - **Heating spot `X0 Y440`:** it is outside the bed on the left of the wiper pad. If your wiper or a cable is in the way, change both `G1 X0 Y440` lines (X up to about 30 is still left of the pad; the fine-wipe spot of LeviQ3 is near X30 Y420, so do not park there).
@@ -203,7 +206,7 @@ M84                               ; steppers off (the axes become "not homed")
 - **`M84` un-homes the printer**; the next print starts with `G28` anyway. Z is not held with the motors off: the cancel routine does the same after a 15 mm lift, so this follows the firmware's own behaviour.
 - **Stealth mode and pressure advance** are restored by the firmware at the end of a print (`OPEN_STEALTHCHOP`, ch. 26; the end/cancel path also resets `M900 K`), so the end code does not repeat them.
 - The stock Anycubic end code is only `M140 S0 / M104 S0 / M107 / M84`; this version adds the retract, the lift, the presentation move and the limit reset.
-- To wait for the nozzle/bed to cool before you walk away, add `TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=50` (no time limit, ch. 11).
+- `TEMPERATURE_WAIT` cannot be used to wait for the cool-down (it never returns, see the start-code notes). To wait for the nozzle to cool, `M109 S50` followed by `M104 S0` should work (a cooling `M109`/`M190` waits until the temperature is within 2 °C of the new target, ch. 11); not tested.
 
 ---
 
