@@ -522,6 +522,8 @@ Three commands that measure or tune something and then change a setting for you.
 
 ## `PA_AUTO_CALIBRATE` — Find the pressure advance automatically
 
+> **Warning — the result overrides your `M900 K` in the next print.** After a successful run (stock setting `enable_dyna_PA: false`), the firmware replaces the `K` of **every** `M900 K…` / `SET_PRESSURE_ADVANCE ADVANCE=…` by the calibrated value, including the one in your slicer's start G-code. The calibration is kept in memory and is only dropped at the **end or cancel of the next print** (which then also sets `K` back to 0.02), at a firmware restart, or by a failed re-calibration. So a `K` test made after a `PA_AUTO_CALIBRATE` (for example a pressure-advance tower) shows no change at all. **To check which `K` is active:** read `pressure_advance` in the `extruder` object (Mainsail / Moonraker status) after your start G-code has run; it shows the value really applied (the calibrated one if the override is active). Nothing is printed in the console by `M900`. In dynamic mode (`enable_dyna_PA: true`) the `K` used for each move is computed per move and cannot be read.
+
 *Pressure advance (`K`)* compensates for the elasticity of the plastic in the nozzle: the extruder pushes slightly more filament while accelerating and pulls back while braking, which sharpens corners. The right value depends on the filament. This command measures it for you with the pressure sensor in the nozzle (the same kind of sensor used for bed leveling).
 
 ### Where the temperatures and the speed come from

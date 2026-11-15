@@ -21,7 +21,8 @@ Also check, in the same printer profile:
 - *Use relative E distances* = on (the start code uses `M83`).
 - *Label objects* = on (Others → "Label objects"), so Mainsail / the touchscreen can cancel single objects.
 - *Emit machine limits to G-code* = **off**. This firmware resets every velocity/acceleration limit that a `SET_VELOCITY_LIMIT` / `M201` / `M203` / `M205` does not name back to the config value (guide ch. 28, rule 2), so a partial limit line can silently undo another one.
-- Keep your *filament start G-code* (for example `M900 K…`): it runs after the machine start code.
+- The machine start code sets the pressure advance from the filament profile (*Enable pressure advance* + *Pressure advance*, step 7). Do not also put an `M900` in the *filament start G-code*: it runs after the machine start code and would override it.
+- **A successful `PA_AUTO_CALIBRATE` overrides this `M900 K` for the next print** (guide ch. 4): the calibrated value is used instead until that print ends. Check `pressure_advance` in the `extruder` status if the value seems to have no effect.
 
 ## One-time setup: two macros in the printer configuration
 
@@ -119,6 +120,12 @@ M400
 ; --- 7. Purge line, starting ON the bed ----------------------------------------
 M7001 Step 8 of 8 - Purge line, starting the print
 M117                              ; REQUIRED by the firmware: print-start signal (X/Y to SpreadCycle, timer reset)
+{if enable_pressure_advance[initial_extruder]}
+M900 K{pressure_advance[initial_extruder]}   ; pressure advance of the Orca filament profile (the smooth time is left unchanged)
+M7001 Pressure advance K {pressure_advance[initial_extruder]} from the filament profile
+{else}
+M7001 Pressure advance not enabled in the filament profile, K left unchanged
+{endif}
 G90
 M83                               ; relative E (LEVIQ_AUTO_ZOFFSET leaves absolute mode on)
 G92 E0
@@ -145,7 +152,7 @@ G92 E0
 | 4 | `LEVIQ_AUTO_ZOFFSET` | Cools the nozzle to 140 °C, homes Z, measures twice (and again after a forced wipe if the result looks suspiciously small), then applies and saves the probe `z_offset` (`IS_SAVE=1` is the default and the only reliable mode, ch. 14). |
 | 5 | `BED_MESH_CALIBRATE ADAPTIVE=1 …` | Measures only the first-layer area + 5 mm (minimum 100 × 100 mm, ch. 3). The profile is called `adaptive` so the full-bed `default` mesh that `G9112` reloads is not overwritten. The mesh is taken **after** the Z offset, so it is consistent with the new offset. |
 | 6 | `M190` (hot beds only), `M104`, `M190`, `M109`, `LEVIQ_TEMP_OFFSET` | A bed above 70 °C is first brought to 10 °C below its final temperature; the nozzle then starts, so the end of the bed heat-up and the nozzle heat-up overlap but the nozzle never waits long at high temperature (no ooze). Then `M190`/`M109` wait for both, and the thermal Z correction `(T − 140) × 0.06 / 80` is applied. |
-| 7 | `M117`, purge line | `M117` is the firmware's print-start signal, not a message (ch. 5); Anycubic's own start code has it right after the preparation. The purge is the stock `UNDERLINE` idea (about 24 mm of filament, 0.3 mm high) but drawn from X30 to X180 on the front edge, entirely on the bed (the stock one starts at X457, outside it). |
+| 7 | `M117`, `M900 K…`, purge line | `M117` is the firmware's print-start signal, not a message (ch. 5); Anycubic's own start code has it right after the preparation. `M900 K{pressure_advance[initial_extruder]}` applies the *Pressure advance* value of the Orca filament profile, but only when *Enable pressure advance* is ticked there; otherwise nothing is sent and the firmware keeps its own `K` (0.02, restored at the end of every print). Only `K` is sent: the smooth time stays at the firmware value (0.04 s). The purge is the stock `UNDERLINE` idea (about 24 mm of filament, 0.3 mm high) but drawn from X30 to X180 on the front edge, entirely on the bed (the stock one starts at X457, outside it). |
 
 ### Things to know
 
