@@ -17,3 +17,6 @@ K3M_2.5.2.8/
 analysis/
 
 PA_TEST_JPB_PLA_Matte.gcode
+
+# Sharp corners tuning work (checklist, scripts, STL, G-code): kept local
+sharp_corners_tuning/
