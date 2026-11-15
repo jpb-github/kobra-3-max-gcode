@@ -9,7 +9,7 @@ Machine start, machine end, before-layer-change and layer-change G-code for **Or
 Orca Slicer → *Printer settings* → *Machine G-code*:
 
 | Orca field | Block below |
-|---|---|
+| --- | --- |
 | Machine start G-code | 1 |
 | Machine end G-code | 2 |
 | Before layer change G-code | 3 |
@@ -42,14 +42,16 @@ gcode:
 [gcode_macro M7002]
 description: Show a message followed by the current Z offsets in the console
 gcode:
-    {{ action_respond_info(rawparams|add:" - G-code Z offset "|add:printer.gcode_move.homing_origin.z|floatformat:4|add:" mm, probe z_offset (config status, may be stale) "|add:printer.configfile.settings.probe.z_offset|floatformat:4, "") }}
+    {% set gz = printer.gcode_move.homing_origin.z|floatformat:4 %}
+    {% set pz = printer.configfile.settings.probe.z_offset|floatformat:4 %}
+    {{ action_respond_info(rawparams|add:" - G-code Z offset "|add:gz|add:" mm, probe z_offset (config status, may be stale) "|add:pz, "") }}
 ```
 
 - `M7000 BED_MESH_CLEAR` runs `BED_MESH_CLEAR`; `M7001 hello` prints `hello` in the console. `action_respond_info` needs the second (unused) argument `""`, the template engine refuses a call with one.
 - **Test in this order:** type `M7001 hello` in the console, then run a print file with the three lines `M7001 hello from a file`, `M7000 M115`, `M7000 BED_MESH_OUTPUT`. You should get the message, the firmware line and the mesh answer.
 - **Message format rule.** The text after `M7001` must start with a **letter**, with no `(`, `/`, `*` or other symbols before the first word. The line parser reads an `M`/`G` command name up to the first letter, `/` or `*`, so `M7001 (1/8) Reset` becomes a command called `M7001 (1`, which does not exist, and the line is silently ignored (seen on the printer: the messages of the first Orca file never appeared). After the first word, plain text is fine. Also no square brackets (Orca placeholders) and no runs of four spaces.
 - The same rule applies to `M7000`: always write the command right after it, `M7000 BED_MESH_CLEAR`.
-- **`M7002 <text>`** prints the text, then the Z offsets: the live G-code Z offset (`printer.gcode_move.homing_origin.z`) and the probe `z_offset` as the config status shows it (it can be stale after `SAVE_CONFIG`, ch. 3). It is called after the LeviQ3 measurement and after `LEVIQ_TEMP_OFFSET`, so the console shows the offset before and after the temperature compensation. The same message rule as `M7001` applies (start with a letter). **(to verify)** the `|add` string concatenation and the `printer.…` paths in this pongo2 template were not run; test with `M7002 test` in the console first. If it prints nothing, check `/tmp/gklib.log` (template errors are only logged, ch. 16).
+- **`M7002 <text>`** prints the text, then the Z offsets: the live G-code Z offset (`printer.gcode_move.homing_origin.z`) and the probe `z_offset` as the config status shows it (it can be stale after `SAVE_CONFIG`, ch. 3). It is called after the LeviQ3 measurement and after `LEVIQ_TEMP_OFFSET`, so the console shows the offset before and after the temperature compensation. The same message rule as `M7001` applies (start with a letter). A filter chain applies to the whole expression before it, so each number is formatted in its own `{% set %}` line (a trailing `|floatformat` on the concatenated text printed just `0.000`, seen on the printer). **(to verify)** the `|add` string concatenation and the `printer.…` paths in this pongo2 template were not run; test with `M7002 test` in the console first. If it prints nothing, check `/tmp/gklib.log` (template errors are only logged, ch. 16).
 - **(to verify)** `rawparams` and `|safe` come from the guide's description of the template engine and from the firmware code; nothing was run. `|safe` stops the engine from escaping quotes or `<`/`>`; the commands here contain none.
 
 ---
@@ -128,12 +130,17 @@ M7002 Z offset after the temperature compensation
 ; --- 7. Purge line, starting ON the bed ----------------------------------------
 M7001 Step 8 of 8 - Purge line, starting the print
 M117                              ; REQUIRED by the firmware: print-start signal (X/Y to SpreadCycle, timer reset)
+
+
+; --- 8. Set Pressure Adavance  ----------------------------------------
+M7001 Step 9 of 9 - Set Pressure Adavance
 {if enable_pressure_advance[initial_extruder]}
 M900 K{pressure_advance[initial_extruder]}   ; pressure advance of the Orca filament profile (the smooth time is left unchanged)
 M7001 Pressure advance K {pressure_advance[initial_extruder]} from the filament profile
 {else}
 M7001 Pressure advance not enabled in the filament profile, K left unchanged
 {endif}
+
 G90
 M83                               ; relative E (LEVIQ_AUTO_ZOFFSET leaves absolute mode on)
 G92 E0
@@ -151,35 +158,38 @@ G92 E0
 
 ### What each part does and why
 
-| Step | Command(s) | Reason |
-|---|---|---|
-| 0 | four `; print_bed_… / first_layer_…` comments | The firmware only builds an adaptive mesh when these four lines exist at the start of a line. The stock Anycubic slicer writes them the same way. The bed lines are fixed to the bed of this printer (426 × 420, from `bed_shape` of the sample files); the first-layer lines come from Orca. |
-| 1 | `CLEAR_PAUSE`, `BED_MESH_CLEAR` | Clean state. A leftover mesh would bend the wipe and the Z-offset moves. |
-| 2 | `M140` → `G28 W` → move to `X0 Y440` → `M104/M109 S170` | The bed warms up while the printer homes. `G28 W` homes Z at the wiper platform (X30 Y404) instead of the bed center: the wipe macro moves to fixed heights (Z −0.8 at the ends of the pad, Z 1 over the brush) that assume this reference, and the stock `G9112` itself homes with `G28 W` when the printer is not homed. A plain `G28` (Z at the bed center) makes `G9112` skip its own homing, and the nozzle can then pass too high above the brush. The nozzle | then heats to the wipe temperature at the rear-left spot, left of the wiper pad (X42–102) and behind the bed edge (Y420), so drips fall outside the bed. `X0 Y440` is the spot the vendor's own LeviQ3 preheat uses (`platform_offset_extru`, ch. 14). |
-| 3 | `G9113`, `G9112`, back to `X0 Y440`, `M104 S140`, `M190` + `G4 P60000` | The wiper pad is off the bed, so the wipe happens while the bed is still heating. `G9112` does nothing when its "already cleaned" memory is set, so it is reset first; it also clears and reloads the mesh and switches the X/Y drivers around the wipe. While the printer waits for the bed (`M190`, only to ±2 °C) and soaks for 60 s, the nozzle target is set to 140 °C (the probing temperature `extru_end_temp`), so it cools during the wait and `LEVIQ_AUTO_ZOFFSET` finds it already there. Soak and cooling happen right before the measurements. |
-| 4 | `LEVIQ_AUTO_ZOFFSET` | Cools the nozzle to 140 °C, homes Z, measures twice (and again after a forced wipe if the result looks suspiciously small), then applies and saves the probe `z_offset` (`IS_SAVE=1` is the default and the only reliable mode, ch. 14). |
-| 5 | `BED_MESH_CALIBRATE ADAPTIVE=1 …` | Measures only the first-layer area + 5 mm (minimum 100 × 100 mm, ch. 3). The profile is called `adaptive` so the full-bed `default` mesh that `G9112` reloads is not overwritten. The mesh is taken **after** the Z offset, so it is consistent with the new offset. |
-| 6 | `M190` (hot beds only), `M104`, `M190`, `M109`, `LEVIQ_TEMP_OFFSET` | A bed above 70 °C is first brought to 10 °C below its final temperature; the nozzle then starts, so the end of the bed heat-up and the nozzle heat-up overlap but the nozzle never waits long at high temperature (no ooze). Then `M190`/`M109` wait for both, and the thermal Z correction `(T − 140) × 0.06 / 80` is applied. |
-| 7 | `M117`, `M900 K…`, purge line | `M117` is the firmware's print-start signal, not a message (ch. 5); Anycubic's own start code has it right after the preparation. `M900 K{pressure_advance[initial_extruder]}` applies the *Pressure advance* value of the Orca filament profile, but only when *Enable pressure advance* is ticked there; otherwise nothing is sent and the firmware keeps its own `K` (0.02, restored at the end of every print). Only `K` is sent: the smooth time stays at the firmware value (0.04 s). The purge is the stock `UNDERLINE` idea (about 24 mm of filament, 0.3 mm high) but drawn from X30 to X180 on the front edge, entirely on the bed (the stock one starts at X457, outside it). |
+| Step | Command(s) | Reason | |---|---|---| | 0 | four `; print_bed_… / first_layer_…` comments | The firmware only builds an adaptive mesh when these four lines exist at the start of a line. The stock Anycubic slicer writes them the same way. The bed lines are fixed to the bed of this printer (426 × 420, from `bed_shape` of the sample files); the first-layer lines come from Orca. | | 1 | `CLEAR_PAUSE`, `BED_MESH_CLEAR` | Clean state. A leftover mesh would bend the wipe and the Z-offset moves. | | 2 | `M140` → `G28 W` → move to `X0 Y440` → `M104/M109 S170` | The bed warms up while the printer homes. `G28 W` homes Z at the wiper platform (X30 Y404) instead of the bed center: the wipe macro moves to fixed heights (Z −0.8 at the ends of the pad, Z 1 over the brush) that assume this reference, and the stock `G9112` itself homes with `G28 W` when the printer is not homed. A plain `G28` (Z at the bed center) makes `G9112` skip its own homing, and the nozzle can then pass too high above the brush. The nozzle | then heats to the wipe temperature at the rear-left spot, left of the wiper pad (X42–102) and behind the bed edge (Y420), so drips fall outside the bed. `X0 Y440` is the spot the vendor's own LeviQ3 preheat uses (`platform_offset_extru`, ch. 14). | | 3 | `G9113`, `G9112`, back to `X0 Y440`, `M104 S140`, `M190` + `G4 P60000` | The wiper pad is off the bed, so the wipe happens while the bed is still heating. `G9112` does nothing when its "already cleaned" memory is set, so it is reset first; it also clears and reloads the mesh and switches the X/Y drivers around the wipe. While the printer waits for the bed (`M190`, only to ±2 °C) and soaks for 60 s, the nozzle target is set to 140 °C (the probing temperature `extru_end_temp`), so it cools during the wait and `LEVIQ_AUTO_ZOFFSET` finds it already there. Soak and cooling happen right before the measurements. | | 4 | `LEVIQ_AUTO_ZOFFSET` | Cools the nozzle to 140 °C, homes Z, measures twice (and again after a forced wipe if the result looks suspiciously small), then applies and saves the probe `z_offset` (`IS_SAVE=1` is the default and the only reliable mode, ch. 14). | | 5 | `BED_MESH_CALIBRATE ADAPTIVE=1 …` | Measures only the first-layer area + 5 mm (minimum 100 × 100 mm, ch. 3). The profile is called `adaptive` so the full-bed `default` mesh that `G9112` reloads is not overwritten. The mesh is taken **after** the Z offset, so it is consistent with the new offset. | | 6 | `M190` (hot beds only), `M104`, `M190`, `M109`, `LEVIQ_TEMP_OFFSET` | A bed above 70 °C is first brought to 10 °C below its final temperature; the nozzle then starts, so the end of the bed heat-up and the nozzle heat-up overlap but the nozzle never waits long at high temperature (no ooze). Then `M190`/`M109` wait for both, and the thermal Z correction `(T − 140) × 0.06 / 80` is applied. | | 7 | `M117`, `M900 K…`, purge line | `M117` is the firmware's print-start signal, not a message (ch. 5); Anycubic's own start code has it right after the preparation. `M900 K{pressure_advance[initial_extruder]}` applies the *Pressure advance* value of the Orca filament profile, but only when *Enable pressure advance* is ticked there; otherwise nothing is sent and the firmware keeps its own `K` (0.02, restored at the end of every print). Only `K` is sent: the smooth time stays at the firmware value (0.04 s). The purge is the stock `UNDERLINE` idea (about 24 mm of filament, 0.3 mm high) but drawn from X30 to X180 on the front edge, entirely on the bed (the stock one starts at X457, outside it). |
 
 ### Things to know
 
 - **Never use `TEMPERATURE_WAIT` in this firmware: it never returns.** The first two versions of step 6 used it and the printer stayed stuck with the nozzle target at 140 °C, even with `MAXIMUM` added (found on the printer, then in the firmware code: the value of `MAXIMUM` is capped at `MINIMUM` by a porting bug, so the wait window is always empty, ch. 11 of the guide). The start code now uses `M190` instead: for a bed above 70 °C it waits until the bed is 10 °C below its final temperature, then starts the nozzle heating, then waits for the bed and the nozzle. For a bed at 70 °C or less the bed is already at (or within 10 °C of) its temperature after the preheat, so the nozzle simply starts first.
 
 - **Cooling to 140 °C:** the value is `extru_end_temp` of the `[leviQ3]` section (stock 140). If you changed it, change the `M104 S140` line too. Passive cooling from 170 °C to 140 °C takes a minute or two; if it is not there when the soak ends, `LEVIQ_AUTO_ZOFFSET` just waits for the rest. To speed it up you can add `M106 S255` before the soak (the firmware turns the fan off itself in `LEVIQ_AUTO_ZOFFSET`).
+
 - **Heating spot `X0 Y440`:** it is outside the bed on the left of the wiper pad. If your wiper or a cable is in the way, change both `G1 X0 Y440` lines (X up to about 30 is still left of the pad; the fine-wipe spot of LeviQ3 is near X30 Y420, so do not park there).
 
 - **Why most commands are written as `M7000 <command>`: the print reader skips lines.** Found in the firmware (disassembly of the print-file reader, 2026-11-14) and consistent with every test on the printer: a line of a print file is only executed if it starts with `G`+digit, `T`+digit or `M`+digit (the exact line `M84` is refused), or with one of 12 prefixes (`SNAPSHOT`, `SET_IDLE_TIMEOUT`, `SET_VELOCITY_LIMIT`, `SET_PRESSURE_ADVANCE`, `SAVE_GCODE_STATE`, `RESTORE_GCODE_STATE`, `TUNING_TOWER`, `SHAPER_CALIBRATE`, `EXCLUDE_OBJECT_DEFINE`, `EXCLUDE_OBJECT_START`, `EXCLUDE_OBJECT_END`, `EXCLUDE_OBJECT`). **Every other line is silently dropped, with no error**: `BED_MESH_CALIBRATE`, `BED_MESH_CLEAR`, `LEVIQ_*`, `TEMPERATURE_WAIT`, `CLEAR_PAUSE`, `RESET_VELOCITY_LIMIT`, `ECHO`, `MOVE_HEAT_POS`, any custom macro. That is why your macro tests did nothing. Stock files only use lines that pass (`G9111` does the leveling work internally). A macro whose name starts with `M` + digit (like the stock `M486`) passes the filter, so the two macros of the one-time setup (`M7000`, `M7001`) are the way in. **(to verify on the printer: the macros were not run yet.)**
+
 - **Console messages** come from `M7001 <text>` (`action_respond_info` does reach the console). `ECHO` and `STATUS` only write to the log. There is no known command to show text on the printer's display; `M117` ignores its text.
+
 - **Square brackets are Orca placeholders.** `[...]` in any custom G-code, comments included, is expanded by Orca and makes the slicer refuse ("Expecting a legacy variable expansion format"). Do not put them in comments or text.
+
 - **Do not turn the automatic Z offset off** (`LEVIQ_AUTO_ZOFFSET_ON_OFF ON_OFF=0`) while keeping this start code: `LEVIQ_TEMP_OFFSET` would then add its correction to the saved offset at every print. With the measurement on, `LEVIQ_AUTO_ZOFFSET` zeroes the offsets first, so nothing accumulates.
+
 - **`LEVIQ_AUTO_ZOFFSET` and `LEVIQ_TEMP_OFFSET` both run `SAVE_CONFIG`** (on this printer the values go to `printer_mutable.cfg`). That is the same as the stock `G9111`, but it means the config file is rewritten at each print.
+
 - **`LEVIQ_TEMP_OFFSET` takes the print temperature from the file** (header `; nozzle_temperature =` / `; first_layer_temperature =` or an `M109 S…` line). The `M109 S…` line of step 6 is there, so it is found **(to verify which source wins)**.
+
 - **The file has to be started as a print job** (touchscreen, Mainsail "Print"), not pasted line by line in a console: the first-layer information is only collected while a print runs.
+
 - **Bed temperature during the mesh** is the preheat (60 °C, or lower if your print temperature is lower). The bed is then heated further for ABS / PETG-type temperatures. If your mesh looks off at 90–100 °C, raise the `60` in step 2 (the mesh is measured at that temperature).
+
 - **Purge line outside the adaptive mesh.** At Y5 the purge line is usually outside the small adaptive mesh. Klipper-style meshes use the nearest edge value there, which is a reasonable approximation for a purge line. If you want the purge exactly under a measured area, move it next to your print (use `first_layer_print_min`) or measure a full mesh.
+
 - **Purge line collides with a skirt/brim at the front edge?** Change `Y5` (and the wipe `Y8`) to a larger value; the line sits at the front edge of the bed, the bed moves in Y.
+
 - If `M104 S…` / `M140 S…` in this start code makes Orca skip its own heating commands, nothing is lost: all the needed temperatures are set here.
+
 - **Fallback without the four comment lines:** replace the mesh line with explicit limits, for example `BED_MESH_CALIBRATE MESH_MIN=… MESH_MAX=… PROBE_COUNT=5,5 PROFILE=adaptive`, using `{first_layer_print_min[0]}`-style values clamped to 10…410.
 
 ---
