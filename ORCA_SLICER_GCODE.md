@@ -38,12 +38,18 @@ gcode:
 description: Show a message in the console
 gcode:
     {{ action_respond_info(rawparams, "") }}
+
+[gcode_macro M7002]
+description: Show a message followed by the current Z offsets in the console
+gcode:
+    {{ action_respond_info(rawparams|add:" - G-code Z offset "|add:printer.gcode_move.homing_origin.z|floatformat:4|add:" mm, probe z_offset (config status, may be stale) "|add:printer.configfile.settings.probe.z_offset|floatformat:4, "") }}
 ```
 
 - `M7000 BED_MESH_CLEAR` runs `BED_MESH_CLEAR`; `M7001 hello` prints `hello` in the console. `action_respond_info` needs the second (unused) argument `""`, the template engine refuses a call with one.
 - **Test in this order:** type `M7001 hello` in the console, then run a print file with the three lines `M7001 hello from a file`, `M7000 M115`, `M7000 BED_MESH_OUTPUT`. You should get the message, the firmware line and the mesh answer.
 - **Message format rule.** The text after `M7001` must start with a **letter**, with no `(`, `/`, `*` or other symbols before the first word. The line parser reads an `M`/`G` command name up to the first letter, `/` or `*`, so `M7001 (1/8) Reset` becomes a command called `M7001 (1`, which does not exist, and the line is silently ignored (seen on the printer: the messages of the first Orca file never appeared). After the first word, plain text is fine. Also no square brackets (Orca placeholders) and no runs of four spaces.
 - The same rule applies to `M7000`: always write the command right after it, `M7000 BED_MESH_CLEAR`.
+- **`M7002 <text>`** prints the text, then the Z offsets: the live G-code Z offset (`printer.gcode_move.homing_origin.z`) and the probe `z_offset` as the config status shows it (it can be stale after `SAVE_CONFIG`, ch. 3). It is called after the LeviQ3 measurement and after `LEVIQ_TEMP_OFFSET`, so the console shows the offset before and after the temperature compensation. The same message rule as `M7001` applies (start with a letter). **(to verify)** the `|add` string concatenation and the `printer.…` paths in this pongo2 template were not run; test with `M7002 test` in the console first. If it prints nothing, check `/tmp/gklib.log` (template errors are only logged, ch. 16).
 - **(to verify)** `rawparams` and `|safe` come from the guide's description of the template engine and from the firmware code; nothing was run. `|safe` stops the engine from escaping quotes or `<`/`>`; the commands here contain none.
 
 ---
@@ -97,6 +103,7 @@ M7001 Step 5 of 8 - Measuring the Z offset (LeviQ3)
 M7000 BED_MESH_CLEAR
 M7000 LEVIQ_AUTO_ZOFFSET                ; nozzle to 140 C, G28 Z, strain-gauge measurement, saved
 M400
+M7002 Z offset after the LeviQ3 measurement
 G9113                             ; leave the "cleaned" memory reset (G9111 does the same)
 
 ; --- 5. Adaptive bed mesh (nozzle is at 140 C, bed at the preheat temperature) --
@@ -116,6 +123,7 @@ M190 S[bed_temperature_initial_layer_single]
 M109 S[nozzle_temperature_initial_layer]
 M7000 LEVIQ_TEMP_OFFSET                 ; Z correction for the hot nozzle (the offset was measured at 140 C)
 M400
+M7002 Z offset after the temperature compensation
 
 ; --- 7. Purge line, starting ON the bed ----------------------------------------
 M7001 Step 8 of 8 - Purge line, starting the print
