@@ -11,6 +11,7 @@ passwords.txt
 *
 !.gitignore
 !*.md
+!Bed Leveling Planner.xlsm
 !*/
 Klipper-go/
 K3M_2.5.2.8/
