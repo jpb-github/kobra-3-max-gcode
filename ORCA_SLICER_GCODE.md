@@ -40,18 +40,21 @@ gcode:
     {{ action_respond_info(rawparams, "") }}
 
 [gcode_macro M7002]
-description: Show a message followed by the current Z offsets in the console
+description: Show a message, then the current G-code Z offset (the Z value of the next console line)
 gcode:
-    {% set gz = printer.gcode_move.homing_origin.z|floatformat:4 %}
-    {% set pz = printer.configfile.settings.probe.z_offset|floatformat:4 %}
-    {{ action_respond_info(rawparams|add:" - G-code Z offset "|add:gz|add:" mm, probe z_offset (config status, may be stale) "|add:pz, "") }}
+    {{ action_respond_info(rawparams|add:" - G-code Z offset = Z of the next line", "") }}
+    SAVE_GCODE_STATE NAME=M7002
+    G92 Z0
+    SET_GCODE_OFFSET Z=0
+    M114
+    RESTORE_GCODE_STATE NAME=M7002
 ```
 
 - `M7000 BED_MESH_CLEAR` runs `BED_MESH_CLEAR`; `M7001 hello` prints `hello` in the console. `action_respond_info` needs the second (unused) argument `""`, the template engine refuses a call with one.
 - **Test in this order:** type `M7001 hello` in the console, then run a print file with the three lines `M7001 hello from a file`, `M7000 M115`, `M7000 BED_MESH_OUTPUT`. You should get the message, the firmware line and the mesh answer.
 - **Message format rule.** The text after `M7001` must start with a **letter**, with no `(`, `/`, `*` or other symbols before the first word. The line parser reads an `M`/`G` command name up to the first letter, `/` or `*`, so `M7001 (1/8) Reset` becomes a command called `M7001 (1`, which does not exist, and the line is silently ignored (seen on the printer: the messages of the first Orca file never appeared). After the first word, plain text is fine. Also no square brackets (Orca placeholders) and no runs of four spaces.
 - The same rule applies to `M7000`: always write the command right after it, `M7000 BED_MESH_CLEAR`.
-- **`M7002 <text>`** prints the text, then the Z offsets: the live G-code Z offset (`printer.gcode_move.homing_origin.z`) and the probe `z_offset` as the config status shows it (it can be stale after `SAVE_CONFIG`, ch. 3). It is called after the LeviQ3 measurement and after `LEVIQ_TEMP_OFFSET`, so the console shows the offset before and after the temperature compensation. The same message rule as `M7001` applies (start with a letter). A filter chain applies to the whole expression before it, so each number is formatted in its own `{% set %}` line (a trailing `|floatformat` on the concatenated text printed just `0.000`, seen on the printer). **(to verify)** the `|add` string concatenation and the `printer.…` paths in this pongo2 template were not run; test with `M7002 test` in the console first. If it prints nothing, check `/tmp/gklib.log` (template errors are only logged, ch. 16).
+- **`M7002 <text>`** prints the text, then the live G-code Z offset (`gcode_move` `homing_origin`, Z: the value Mainsail shows) as the **Z value of the next console line** (`X:… Y:… Z:0.112 E:…`; X, Y and E are just the current position). It is called after the LeviQ3 measurement and after `LEVIQ_TEMP_OFFSET`, so the console shows the offset before and after the temperature compensation. The same message rule as `M7001` applies (start with a letter). **How it works:** no G-code command prints the offset and a template cannot read it (see below), so the macro extracts it with `M114`, which prints the G-code position (`last position − base`): `SAVE_GCODE_STATE` keeps everything, `G92 Z0` makes that Z equal to 0, `SET_GCODE_OFFSET Z=0` (without `MOVE`, so nothing moves) shifts the base by minus the offset, so the next `M114` shows the old offset as its Z, and `RESTORE_GCODE_STATE` puts the offsets, the position and the speed back. **Tested on the printer** (live offset 0.1125 mm): the console showed `Z:0.112` and `homing_origin` and the G-code position were identical before and after. The three decimals of `M114` are rounded. **Why the earlier versions failed (tested on the printer):** the version with `{% set gz = printer.gcode_move.homing_origin.z %}` always printed 0.0000 while the offset was 0.1125, because in the firmware source the template variable `printer` is a Go struct whose lookup method (`__getitem__`) is not exported, so pongo2 cannot resolve `printer.<anything>` (no stock macro uses `printer.…` either), and `homing_origin` is a plain list without `.z`. `GET_POSITION` prints nothing at all on the printer (the command is accepted, no console line, cause not found). The probe `z_offset` has no replacement: after `LEVIQ_AUTO_ZOFFSET` it is the opposite of the G-code offset. **(to verify)** the sequence was run line by line on the printer, not yet as the installed macro called from a print file; after changing the macro in `printer.custom.cfg`, reboot the printer and test with `M7002 test` in the console.
 - **(to verify)** `rawparams` and `|safe` come from the guide's description of the template engine and from the firmware code; nothing was run. `|safe` stops the engine from escaping quotes or `<`/`>`; the commands here contain none.
 
 ---
