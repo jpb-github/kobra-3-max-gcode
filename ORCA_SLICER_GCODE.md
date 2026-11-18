@@ -193,6 +193,8 @@ G92 E0
 
 - If `M104 S…` / `M140 S…` in this start code makes Orca skip its own heating commands, nothing is lost: all the needed temperatures are set here.
 
+- **Do not change the profile name `adaptive`, and do not add other named profiles.** A saved bed-mesh profile with any other name can lock the printer at its next start with error 11407 (see the warning in chapter 3 of `K3M_gcode_user_guide.md`). `adaptive` is the only name seen to survive restarts.
+
 - **Fallback without the four comment lines:** replace the mesh line with explicit limits, for example `BED_MESH_CALIBRATE MESH_MIN=… MESH_MAX=… PROBE_COUNT=5,5 PROFILE=adaptive`, using `{first_layer_print_min[0]}`-style values clamped to 10…410.
 
 ---

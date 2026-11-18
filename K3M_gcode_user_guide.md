@@ -208,11 +208,19 @@ The bed is never perfectly flat. The **bed mesh** is a grid of height measuremen
 Key ideas used in this chapter:
 
 - **Mesh**: the grid of measured heights currently in use. There is at most one active mesh at a time.
-- **Profile**: a named copy of a mesh kept in memory, so that you can reload it later without measuring again. The stock printer uses a profile called `default`.
+- **Profile**: a named copy of a mesh kept in memory, so that you can reload it later without measuring again. The stock printer uses a profile called `default`. **Use only that one: other names can lock the printer (see the warning below).**
 - **Fade**: the correction is applied fully on the first layers and gradually removed as the nozzle goes up, so a tall print is not warped by the bed's shape. On the stock configuration the correction is full at Z = 1 mm and fully gone at Z = 10 mm (`fade_start` = 1, `fade_end` = 10, `fade_target` = 0 in the `[bed_mesh]` section of `printer.cfg`).
 - **Saved to disk or not**: measuring a mesh or saving a profile only keeps it **for the current session**. To keep it after a restart you must run `SAVE_CONFIG` (which writes the configuration file **without restarting** the firmware — its help text and the bed-mesh message still say "restart" — see the note on where the values land and what the status objects show at the end of this chapter's `SAVE_CONFIG` remark below).
 
 The stock configuration measures a 9 × 9 grid (81 points) between X/Y = 10 and 410 mm, and smooths it with a "bicubic" interpolation.
+
+> ## ⚠️ WARNING — never use named bed-mesh profiles (printer locked with error 11407)
+>
+> **Use only the `default` mesh.** Never run `BED_MESH_CALIBRATE PROFILE=<name>` or `BED_MESH_PROFILE SAVE=<name>` with another name, and never let a `SAVE_CONFIG` write such a profile.
+>
+> A saved named profile (a `"bed_mesh <name>"` section in `printer_mutable.cfg`) can **lock the printer at its next start with error 11407**. The firmware reads that section as a *configuration* section, stops with `Option 'probe_count' in section 'bed_mesh <name>' must be specified`, and the printer program (`gklib`) exits. The touchscreen stays on the error message, which hides every button (a USB firmware update cannot be started from it either), and the SSH and web interfaces did not answer. Seen on 2026-11-18 with a profile named `shimtest`. The only name seen to survive restarts is `adaptive` (created by an adaptive-mesh print start): that is an observation, not a guarantee.
+>
+> **If it already happened — principle of the fix.** The printer has a USB mechanism that needs no screen and no network: at start-up it looks for `update.swu` in the folder `aGVscF9zb3Nf` of a FAT32 USB stick, unpacks it (a password-protected zip, the same "SWU" password as the official firmware packages) and runs the `update.sh` it contains as root. A package whose `update.sh` replaces `/userdata/app/gk/printer_mutable.cfg` by a copy **without** the `bed_mesh <name>` section (keeping the old file as a backup, removing `update.swu` from the stick, then rebooting) brings the printer back; one beep means the package was found, two beeps mean the script ran. The other settings stored in that file (PID, Z offset, input shaper, `default` mesh…) are kept, which is why you should have a copy of it (the USB "export configuration" feature of the printer produces one).
 
 | Command | In one line |
 |---|---|
@@ -254,7 +262,7 @@ All optional. Whatever you leave out comes from the `[bed_mesh]` section of `pri
 
 | Parameter | Meaning | Values | Default |
 |---|---|---|---|
-| `PROFILE` | Name under which the new mesh is stored. | Any name without spaces. Must not be empty. | `default` |
+| `PROFILE` | Name under which the new mesh is stored. **Do not use it**: a name other than `default` can lock the printer with error 11407 (see the warning at the start of this chapter). | Leave it out (= `default`). | `default` |
 | `MESH_MIN` | X,Y position of the first (front-left) point of the grid — the corner of the measured area with the smallest coordinates. | Two numbers separated by a comma, **no spaces**: `MESH_MIN=20,20`. Must lie within the bed. | `10,10` (from `printer.cfg`) |
 | `MESH_MAX` | X,Y position of the last (rear-right) point of the grid. | Same format: `MESH_MAX=400,400`. Must be larger than `MESH_MIN`. | `410,410` (from `printer.cfg`) |
 | `PROBE_COUNT` | Number of points to measure along X and Y. | `n,m` (X count, Y count) or a single number `n` (used for both). Each count is **at least 3**. | `9,9` (from `printer.cfg`) |
@@ -265,7 +273,7 @@ All optional. Whatever you leave out comes from the `[bed_mesh]` section of `pri
 
 > **Observed on the printer (2026-11-17, command sent through Moonraker `/printer/gcode/script`, wrapped in the `M7000` macro of `ORCA_SLICER_GCODE.md` because of the next note):**
 >
-> - **`PROBE_COUNT`, `MESH_MIN` and `MESH_MAX` do not work.** `M7000 BED_MESH_CALIBRATE PROFILE=shimtest PROBE_COUNT=3,3 MESH_MIN=100,100 MESH_MAX=300,300` measured the **whole 9 × 9 grid** (X/Y 10 to 410, 81 points, about 6 minutes), and the profile that was stored has `x_count`/`y_count` 9 and `min`/`max` 10 to 410. Treat the grid as fixed by `[bed_mesh]`.
+> - **`PROBE_COUNT`, `MESH_MIN` and `MESH_MAX` do not work.** `M7000 BED_MESH_CALIBRATE PROFILE=shimtest PROBE_COUNT=3,3 MESH_MIN=100,100 MESH_MAX=300,300` (the `shimtest` profile it left is what locked the printer with error 11407: do not repeat this) measured the **whole 9 × 9 grid** (X/Y 10 to 410, 81 points, about 6 minutes), and the profile that was stored has `x_count`/`y_count` 9 and `min`/`max` 10 to 410. Treat the grid as fixed by `[bed_mesh]`.
 > - **`PROFILE` works, but the result is invisible until `SAVE_CONFIG`.** When the measurement ends the command returns without an error and `bed_mesh` (Moonraker `printer/objects/query?bed_mesh`, `BED_MESH_PROFILE LOAD=…`) still shows the **previous** mesh. Only after `SAVE_CONFIG` do the new mesh and the new profile appear (a `bed_mesh shimtest` section in `printer_mutable.cfg`, and `default` with the new values after a run without `PROFILE`). Before that, `BED_MESH_PROFILE LOAD=shimtest` changes nothing and prints no error. So the mesh is measured and staged in memory, and the status object and the profile list show only the saved configuration. Reading the mesh right after the measurement therefore returns the old one.
 > - In a print started from a file the adaptive form was seen to work (`M7000 BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=5 PROFILE=adaptive` left a `bed_mesh adaptive` profile of 8 × 8 points in `printer_mutable.cfg`, probably saved by a later `SAVE_CONFIG` of the print start), so `ADAPTIVE` is not covered by the first point.
 >
@@ -295,7 +303,7 @@ Anycubic Slicer Next writes them from its machine start G-code (the stock profil
 1. The measured area becomes the rectangle of the first layer, enlarged by `ADAPTIVE_MARGIN` on every side, and **never larger than the normal mesh area** (`MESH_MIN`/`MESH_MAX` or the configured area).
 2. If that rectangle is smaller than the minimum area size (`min_bedmesh_area_size`, 100 × 100 mm by default), it is enlarged around its centre up to that size, then limited to the mesh area again.
 3. The number of points on each axis is the normal count multiplied by (new size ÷ normal size), **rounded up**, then the algorithm rules above are applied. A 9 × 9 mesh over a 100 × 100 mm part on a 400 × 400 mm area becomes roughly 3 × 3 to 4 × 4.
-4. The mesh is measured, activated and stored in the profile named by `PROFILE` — which is `default` unless you say otherwise. **A partial mesh therefore replaces the full-bed `default` mesh** (for the current session). Use another profile name, for example `PROFILE=adaptive`, if you want to keep the full-bed mesh.
+4. The mesh is measured, activated and stored in the profile named by `PROFILE` — which is `default` unless you say otherwise. **A partial mesh therefore replaces the full-bed `default` mesh** (for the current session). Keeping the full-bed mesh by storing the partial one under another name is risky (see the warning at the start of this chapter); `adaptive` is the only name seen to survive restarts.
 
 *When it silently does nothing special.* If the four lines are missing (other slicer, non-print use, or a print that has ended — the information is erased when a print finishes or is cancelled), the whole bed is measured as if `ADAPTIVE=0`, and **no message tells you so**. The only message you can get is "virtualSD objects not enabled. Using full mesh..." in the unusual case that the print-job module is not running.
 
@@ -319,20 +327,9 @@ BED_MESH_CALIBRATE
 ```
 Home, then measure the whole bed with the stock settings and store the result in the `default` profile.
 
-```
-BED_MESH_CALIBRATE PROFILE=pei_60C
-```
-Measure the whole bed and store the result in a profile called `pei_60C` (for example one profile per bed surface or temperature).
+> **Do not keep one mesh per bed surface or temperature under a name** (`PROFILE=pei_60C` and the like): see the warning at the start of this chapter. Measure again into `default` instead.
 
-```
-BED_MESH_CALIBRATE PROBE_COUNT=5,5 PROFILE=quick
-```
-A faster, coarser 5 × 5 mesh (25 points) stored as `quick`.
-
-```
-BED_MESH_CALIBRATE MESH_MIN=100,100 MESH_MAX=320,320 PROBE_COUNT=7,7
-```
-Measure only the centre area of the bed (7 × 7 points from 100 to 320 mm).
+> `PROBE_COUNT`, `MESH_MIN` and `MESH_MAX` are ignored by this firmware (see the observation above), so no example is given for them.
 
 ```
 BED_MESH_CALIBRATE ADAPTIVE=1 ADAPTIVE_MARGIN=5
@@ -350,6 +347,8 @@ In a print start code: measure only under the model (+ 5 mm border) of the file 
 ## `BED_MESH_PROFILE` — Save, load or remove a profile
 
 ### What it does
+
+> **⚠️ WARNING — do not use `SAVE` (or `REMOVE`) with a name other than `default`.** A saved named profile can lock the printer at its next start with **error 11407**. Details and the way out: see the warning at the start of this chapter. Only `BED_MESH_PROFILE LOAD=default` is safe to use.
 
 Manages the named meshes kept in the printer's memory. You give **one** action per command, followed by a profile name:
 
@@ -371,7 +370,7 @@ Exactly one of the three is expected per call. If you give several at once, only
 
 | Parameter | Meaning | Values | Default |
 |---|---|---|---|
-| `SAVE` | Save the active mesh under this name. | A name without spaces. **`default` is reserved and refused** for `SAVE` (`BED_MESH_CALIBRATE` creates the `default` profile itself). The bed must have been measured (a mesh must be active). | — (required) |
+| `SAVE` | Save the active mesh under this name. **Do not use** (error 11407 risk, see the warning above). | A name without spaces. **`default` is reserved and refused** for `SAVE` (`BED_MESH_CALIBRATE` creates the `default` profile itself). The bed must have been measured (a mesh must be active). | — (required) |
 | `LOAD` | Activate the profile with this name. | Name of an existing profile (`default`, or one you saved). | — (required) |
 | `REMOVE` | Delete the profile with this name. | Name of an existing profile. | — (required) |
 
@@ -390,20 +389,15 @@ Exactly one of the three is expected per call. If you give several at once, only
 ### Examples
 
 ```
-BED_MESH_PROFILE SAVE=pei_60C
+BED_MESH_PROFILE LOAD=default
 ```
-Keep the mesh you just measured under the name `pei_60C`.
+Use the stored `default` mesh again without measuring (for example in your print start code).
 
 ```
-BED_MESH_PROFILE LOAD=pei_60C
-```
-Use that mesh again without measuring (for example in your print start code).
-
-```
-BED_MESH_PROFILE REMOVE=quick
+BED_MESH_PROFILE REMOVE=<name>
 SAVE_CONFIG
 ```
-Delete a profile and make the deletion permanent (the firmware restarts).
+Only to get rid of a named profile that already exists, so that it can no longer lock the printer at the next start (not tested on a printer: check afterwards that `printer_mutable.cfg` no longer contains a `"bed_mesh <name>"` section, and do not restart the printer before that).
 
 ---
 
