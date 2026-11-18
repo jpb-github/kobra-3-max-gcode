@@ -30,7 +30,7 @@ It simulates the bed after each correction, so you can see the expected result b
 | **Excel** | Windows desktop Excel (2010 or later, 32 or 64 bit) with macros enabled. The macros use `MSXML2.ServerXMLHTTP` and the Windows `Sleep` function, so Excel for the web, Excel for Mac and LibreOffice do not work. |
 | **Printer** | A Kobra 3 Max reachable over the network through **Moonraker** (default port 7125). The printer used for the development runs **Rinkhals**, which provides Moonraker; the workbook assumes its behaviour (see [Why the test goes through `M7000`](#why-the-test-goes-through-m7000)). |
 | **Printer macros** | `M7000` (wraps a command so that Rinkhals does not rewrite it) is **required for the real test**. `M7001` (prints a message in the Mainsail console) is optional. Both are defined in [`../ORCA_SLICER_GCODE.md`](../ORCA_SLICER_GCODE.md) and must be in the printer configuration (the printer rebooted afterwards). |
-| **Printer commands used** | `G28`, `MOVE_HEAT_POS`, `M140`, `M109`, `M190`, `G9112`, `M7000 BED_MESH_CALIBRATE`, `SAVE_CONFIG`, `TURN_OFF_HEATERS`, `M84`, `G9113`, `BED_MESH_PROFILE LOAD=default`, and `M7001`. They are described in [`../K3M_gcode_user_guide.md`](../K3M_gcode_user_guide.md). |
+| **Printer commands used** | `G28`, `MOVE_HEAT_POS`, `M140`, `M109`, `M190`, `G9112`, `M7000 BED_MESH_CALIBRATE`, `SAVE_CONFIG`, `TURN_OFF_HEATERS`, `M106 S0`, `M84`, `G9113`, `BED_MESH_PROFILE LOAD=default`, and `M7001`. They are described in [`../K3M_gcode_user_guide.md`](../K3M_gcode_user_guide.md). |
 | **Bed** | A bed held by **four fixed screws** (shims, no leveling screws) and carrying a **flexible steel plate**. The mesh must be the stock **9 × 9** grid. |
 
 Nothing else is needed: no Python, no add-in, no internet access.
@@ -52,7 +52,7 @@ Nothing else is needed: no Python, no add-in, no internet access.
 - **Never use named mesh profiles.** The workbook only ever uses `default`, on purpose: a saved named bed-mesh profile can lock the printer at the next start with **error 11407**. See the warning in chapter 3 of [`../K3M_gcode_user_guide.md`](../K3M_gcode_user_guide.md). The `TEST_PROFILE` constant in the code must stay `default` (see [Constants in the code](#constants-in-the-code)).
 - **The Stop button does not interrupt a command already running on the printer** (a probing takes about 6 minutes). It ends the test at the next checkpoint and shuts the printer down.
 - **Do not edit the sheet during a test.** Edits of the shim table are ignored until the test ends.
-- **A failed or stopped real test shuts the printer down**: heaters off, motors off. If the shutdown itself fails, a message tells you to check the printer by hand. Do that: a heater left on is the one real risk of this tool.
+- **A failed or stopped real test shuts the printer down**: heaters off, cooling fan off, motors off. If the shutdown itself fails, a message tells you to check the printer by hand. Do that: a heater left on is the one real risk of this tool.
 
 ## The workbook
 
@@ -70,7 +70,7 @@ All matrices are drawn **as you see the bed from the front**: the last row is th
 | **Screw shims** | `P6:Q8` | Suggested shim thickness under the four screws (back-left `P7`, back-right `Q7`, front-left `P8`, front-right `Q8`). **You can edit these cells**: the simulation is recalculated. |
 | **With screw shims** | `T6:AB14` | The measured mesh plus the tilt that the shims in `P7:Q8` would give (second heat map). |
 | **With shims + tape** | `T19:AB27` | The same after the tape strips (third heat map). The three heat maps share **one colour scale** so they can be compared. |
-| Test statistics | `P15:P18` | After an averaged test: variance between runs (mm²), its standard deviation (mm), the data-quality rating and `Real` or `Mock`. |
+| Test statistics | `P15:P18` | During and after an averaged test: variance between runs (mm²), its standard deviation (mm), the data-quality rating (`n/a` with a single run) and `Real` or `Mock`. |
 | **Strip table** | `O30:V39` | One row per tape strip: the two ends `X1,Y1` and `X2,Y2` (mm from the front-left corner), length, angle and number of layers. |
 | Summary | `P41:R43` | For *Original*, *Shims* and *+ Tape*: the peak-to-peak height range and the standard deviation of the 81 values. |
 | **Tape drawing** | below the measured mesh | A top view of the bed (front at the bottom) with the four screws (grey dots), each strip, its number, size, angle, layers and the coordinates of its ends. The drawing is rebuilt on every calculation. |
@@ -98,7 +98,7 @@ Every value is read **each time a button is pressed**, so there is nothing to sa
 | `WIPE_TEMP` | 170 | Nozzle temperature while wiping (the stock `[leviQ3]` `extru_temp`). |
 | `PROBE_TEMP` | 140 | Nozzle temperature while probing (the stock `[leviQ3]` `extru_end_temp`). |
 | `SOAK_SECONDS` | 180 | Heat soak once the bed has reached its temperature. |
-| `NUM_RUNS` | 5 | Number of probing runs (at least 2: one run gives no variance). |
+| `NUM_RUNS` | 5 | Number of probing runs (at least 1). With a single run the mesh is simply that run, and no variance or data-quality rating can be given (`n/a`). |
 | `MOCK_SIGMA` | 0.02 | Standard deviation of the noise the mock test adds to each run. |
 | `CONSOLE_MESSAGES` | Yes | `Yes` or `No`. `Yes` also prints each step of the test in the Mainsail console through `M7001`. |
 | **Kapton tape** | | |
@@ -133,7 +133,7 @@ Note that, on this printer, the mesh in `bed_mesh` is the one that has been **sa
 
 ### Averaged mesh test
 
-Runs `NUM_RUNS` probings and uses their **average** for everything on the sheet. It also computes the variance between runs, which tells you how much to trust the mesh. What it does depends on the **Real test** checkbox.
+Runs `NUM_RUNS` probings (one is enough) and uses their **average** for everything on the sheet, refreshing it after each run. From two runs on it also computes the variance between runs, which tells you how much to trust the mesh. What it does depends on the **Real test** checkbox.
 
 **Real test unchecked (mock).** Reads the current mesh once and adds Gaussian noise (`MOCK_SIGMA`) to simulate each run, taking one second per run. Nothing is heated or moved, so it is safe even while the printer is busy. Use it to try the workbook and the Stop button.
 
@@ -149,22 +149,22 @@ Runs `NUM_RUNS` probings and uses their **average** for everything on the sheet.
 | 6 | `M190 S<TEST_BED_TEMP>`, `M109 S<PROBE_TEMP>` | Wait for the bed, bring the nozzle to the probing temperature. |
 | 7 | (wait) | Heat soak, `SOAK_SECONDS`, with a countdown in the status bar. |
 | 8 | `M7000 BED_MESH_CALIBRATE`, then `SAVE_CONFIG`, once per run | Probe the whole bed, then save it so that it becomes visible. The mesh is read after each run, and the test waits up to 60 s for a mesh different from the previous one. |
-| 9 | `TURN_OFF_HEATERS`, `M84`, `G9113`, `BED_MESH_PROFILE LOAD=default` | Shutdown: heaters off, motors off, the "nozzle cleaned" memory reset, the `default` mesh reloaded. Every shutdown step is tried even if one fails. |
+| 9 | `TURN_OFF_HEATERS`, `M106 S0`, `M84`, `G9113`, `BED_MESH_PROFILE LOAD=default` | Shutdown: heaters off, cooling fan off, motors off, the "nozzle cleaned" memory reset, the `default` mesh reloaded. Every shutdown step is tried even if one fails. |
 
 With the stock 9 × 9 mesh a probing takes about 6 minutes, so a 5-run test lasts about **40 minutes** with the heating and the soak (an estimate, not a measured figure).
 
 While it runs, Excel is **not frozen**: requests are asynchronous and the macro gives control back to Excel every 50 ms. The status bar shows the progress, and each step is also printed in the Mainsail console when `CONSOLE_MESSAGES` is `Yes` (the mock test prints them too). If the printer has no `M7001` macro the messages are silently dropped and the test goes on. If it has no `M7000` macro, a real test stops **before** sending anything.
 
-**Result.** The sheet shows the average of the runs. The statistics are:
+**Result, updated after every run.** Whatever the number of runs, the sheet is refreshed after each run with the **average of the runs collected so far**: the mesh, the shims, the tape strips, the three heat maps, the summary and the statistics. The banner shows how far you are, for example `3 samples (averaged so far, 5 runs planned)`; after the last run it reads `5 samples (averaged)`. Refreshing takes a few seconds (the tape search is the slow part), during which the printer waits before the next run starts. Early on, the figures are those of few runs and move as more are added; the point of seeing them is to notice a bad probing early and press **Stop**. The statistics are:
 
-- the **variance between runs**: the sample variance of each of the 81 points over the runs, averaged over the points (mm²), and its square root;
-- a **data-quality rating** from that standard deviation: **Excellent** ≤ 0.01 mm, **Good** ≤ 0.02, **Fair** ≤ 0.04, **Poor** above.
+- the **variance between runs**: the sample variance of each of the 81 points over the runs, averaged over the points (mm²), and its square root. With only one run so far there is no variance: the cells show `n/a`;
+- a **data-quality rating** from that standard deviation: **Excellent** ≤ 0.01 mm, **Good** ≤ 0.02, **Fair** ≤ 0.04, **Poor** above (`n/a (1 run)` for a single run).
 
 A Poor rating means the probing itself is noisy (loose bed, dirty or too cold nozzle, insufficient soak): fix that before trusting any shim or tape advice.
 
 ### Stop
 
-Ends the running test at the next checkpoint: between two printer commands, or within a second during the heat soak. A command already running on the printer is **not** interrupted; the macro waits for it, then shuts the printer down. No result is kept from a stopped test.
+Ends the running test at the next checkpoint: between two printer commands, or within a second during the heat soak. A command already running on the printer is **not** interrupted; the macro waits for it, then shuts the printer down. The sheet keeps the average of the runs completed before the stop (a message says how many), and the banner shows `k samples (averaged so far, n runs planned)`, so a stopped test is recognisable as partial. The same applies if a test fails.
 
 ### + and −
 
@@ -229,7 +229,6 @@ All of it is in the VBA module (Alt+F11, `Module1`).
 | `The printer has no M7000 macro` | Install `M7000` (see [`../ORCA_SLICER_GCODE.md`](../ORCA_SLICER_GCODE.md)) and reboot the printer. Nothing was sent. |
 | `The mesh did not change in the 60 s after the probing` | The probing ran but its result did not become the active mesh (the `SAVE_CONFIG` did not take effect). The message includes the active profile name. A mesh read identical to the previous one also stops the test, because it would mean the probing did not run. |
 | `A mesh test is running` | Wait for it or press **Stop**. |
-| `At least 2 runs are needed` | Set `NUM_RUNS` to 2 or more. |
 | `Read a bed mesh first` | **+** / **−** need a mesh on the sheet: click **Get bed mesh**. |
 | `No further strip reduces the spread of the surface` | **+** found nothing more to add; the count is reset to the strips shown. |
 | `Data collected, but the shutdown failed. Check the printer` | The result is kept but a shutdown command failed: **check that the heaters and motors are off by hand.** |
@@ -241,3 +240,4 @@ All of it is in the VBA module (Alt+F11, `Module1`).
 - A real averaged test of 5 runs was run on the author's printer; the saved sheet shows its result (mesh of 2026-11-17 23:22, 5 samples, averaged). The strip drawing, the shim table, the statistics and the Stop and **+** / **−** buttons are part of that version.
 - The `M7000` rewrite problem, the need for `SAVE_CONFIG` before the new mesh becomes visible, and the fact that `PROFILE`, `PROBE_COUNT` and `MESH_MIN`/`MESH_MAX` are ignored were all observed on the printer (see chapter 3 of [`../K3M_gcode_user_guide.md`](../K3M_gcode_user_guide.md)).
 - **Not verified**: that fitting the suggested shims and strips improves the first layer as predicted. Treat the output as advice to check, not a promise.
+- The one-run test and the refresh after every run were checked with simulated runs (no printer): one run shows `n/a` for the variance and rating, a partial average shows `k samples (… so far, n runs planned)`, and the final state equals the full average. They have **not** been run in a real test on the printer.
