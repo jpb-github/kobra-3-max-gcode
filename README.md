@@ -1,5 +1,7 @@
 # Anycubic Kobra 3 Max — G-code, macros and Orca Slicer setup
 
+> **Disclaimer.** Everything here is provided **as is**, without warranty of any kind, and **use is entirely at your own risk**. It was written for **one specific firmware version (2.5.2.8)** and may be wrong or harmful on any other. Wrong G-code or configuration can damage the printer or cause a fire hazard, and can lock the printer (see the bed mesh chapter of the guide). This project is independent and is not affiliated with or endorsed by Anycubic. You are responsible for checking everything before you use it.
+
 Documentation for the Anycubic Kobra 3 Max (firmware **2.5.2.8**, "Klipper-Go"):
 
 - a user-friendly guide to its G-code commands and macros, written from an analysis of the firmware binary (`gklib`); the public Klipper-Go source on GitHub is out of date, so it was used only as a hint, never as the source of truth;
